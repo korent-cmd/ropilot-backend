@@ -9,10 +9,8 @@ app.use(cors({ origin: '*' }));
 app.use(express.json()); 
 
 // --- THE MULTIPLAYER BRAIN ---
-// Instead of one global variable, we store a unique "room" for every user.
 const sessions = {}; 
 
-// Helper function to get or create a session
 function getSession(pin) {
     if (!sessions[pin]) {
         sessions[pin] = {
@@ -20,24 +18,20 @@ function getSession(pin) {
             currentWorkspaceContext: "No context synced.",
             activeScriptData: null,
             chatHistory: [],
-            isPaired: false // Turns true when the web dashboard claims it
+            isPaired: false 
         };
     }
     return sessions[pin];
 }
 
 // --- THE HANDSHAKE ROUTES ---
-
-// 1. Roblox Plugin asks for a new PIN when it starts
 app.get('/api/generate-pin', (req, res) => {
-    // Generate a random 6 digit string (e.g., "492018")
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
-    getSession(pin); // Initialize the empty room
+    getSession(pin); 
     console.log(`🔑 New Pairing PIN generated: ${pin}`);
     res.json({ pin: pin });
 });
 
-// 2. Web Dashboard claims the PIN to link the accounts
 app.post('/api/pair', (req, res) => {
     const { pin } = req.body;
     if (sessions[pin]) {
@@ -48,9 +42,7 @@ app.post('/api/pair', (req, res) => {
     }
 });
 
-
-// --- THE AI ROUTES (Now requiring a PIN!) ---
-
+// --- THE AI ROUTES (Dual-Output JSON) ---
 async function askGeminiForCode(userPrompt, pin) {
     const session = getSession(pin);
     console.log(`\n🧠 Prompt from PIN [${pin}]: "${userPrompt}"`);
@@ -64,13 +56,25 @@ async function askGeminiForCode(userPrompt, pin) {
         
         if (session.activeScriptData) {
             systemRules = `You are an expert Roblox Lua debugger. The user is currently editing a script named "${session.activeScriptData.name}". 
-            Here is the current code inside it:
+            Here is the current code:
             ---
             ${session.activeScriptData.source}
             ---
-            Fix the bugs or add the features the user requests. Output ONLY the completely rewritten, raw, executable Lua code.`;
+            Fix the bugs or add the features the user requests.
+            CRITICAL RULE: You MUST respond strictly in valid JSON format like this:
+            {
+              "message": "A short, friendly explanation of exactly what lines you changed or fixed.",
+              "code": "The completely rewritten, raw, executable Lua code."
+            }
+            Do not include markdown code blocks (like \`\`\`json). Just the raw JSON object.`;
         } else {
-            systemRules = `You are an expert Roblox Studio Lua code generator. Your ONLY job is to output raw, executable Lua code. Do NOT include markdown blocks. 
+            systemRules = `You are an expert Roblox Studio Lua code generator.
+            CRITICAL RULE: You MUST respond strictly in valid JSON format like this:
+            {
+              "message": "A short, friendly explanation of what you just built and parented.",
+              "code": "The raw, executable Lua code using Instance.new()."
+            }
+            Do not include markdown blocks. 
             CURRENT ROBLOX GAME STATE: ${session.currentWorkspaceContext}`;
         }
 
@@ -84,12 +88,17 @@ async function askGeminiForCode(userPrompt, pin) {
         });
 
         const data = await response.json();
-        
         if (data.error) throw new Error(data.error.message);
 
-        let rawAiCode = data.candidates[0].content.parts[0].text.replace(/```lua/gi, "").replace(/```/g, "").trim();
+        // Parse the dual-output JSON
+        let rawAiResponse = data.candidates[0].content.parts[0].text;
+        rawAiResponse = rawAiResponse.replace(/```json/gi, "").replace(/```lua/gi, "").replace(/```/g, "").trim();
+        
+        const parsedResponse = JSON.parse(rawAiResponse);
+        const aiMessage = parsedResponse.message;
+        const rawAiCode = parsedResponse.code;
 
-        session.chatHistory.push({ role: "model", parts: [{ text: rawAiCode }] });
+        session.chatHistory.push({ role: "model", parts: [{ text: rawAiResponse }] });
 
         if (session.activeScriptData) {
             session.pluginData = { action: "edit", code: rawAiCode };
@@ -97,15 +106,15 @@ async function askGeminiForCode(userPrompt, pin) {
             session.pluginData = { action: "execute", code: rawAiCode };
         }
         
-        return { success: true, code: rawAiCode };
+        return { success: true, code: rawAiCode, message: aiMessage };
 
     } catch (error) {
         session.chatHistory.pop(); 
-        return { success: false, error: error.message };
+        console.log("❌ Error formatting JSON:", error.message);
+        return { success: false, error: "AI failed to format response correctly. Try again." };
     }
 }
 
-// All endpoints now require a "?pin=123456" in the URL or body!
 app.get('/code', (req, res) => {
     const pin = req.query.pin;
     if (!pin || !sessions[pin]) return res.json({ action: "execute", code: "" });
@@ -118,7 +127,7 @@ app.post('/api/prompt', async (req, res) => {
     
     if (prompt.toLowerCase() === "clear") {
         getSession(pin).chatHistory = [];
-        return res.json({ success: true, code: "-- Memory wiped." });
+        return res.json({ success: true, message: "Memory wiped. I am a blank slate.", code: "-- Memory cleared." });
     }
     
     const result = await askGeminiForCode(prompt, pin);
