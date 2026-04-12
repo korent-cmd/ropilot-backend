@@ -3,134 +3,157 @@ const express = require('express');
 const cors = require('cors'); 
 const app = express();
 
-// --- CONFIGURATION ---
-// Pulls the key securely from Render's environment variables
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
-let pluginData = { action: "execute", code: "" };
-let currentWorkspaceContext = "No context synced yet. The workspace is unknown.";
-let activeScriptData = null; 
-let chatHistory = []; 
-
-// Open CORS so your Vercel frontend can talk to this Render backend
 app.use(cors({ origin: '*' })); 
 app.use(express.json()); 
 
-// --- THE AI BRAIN (GEMINI) ---
-async function askGeminiForCode(userPrompt) {
-  console.log(`\n?? RoPilot Prompt: "${userPrompt}"`);
-  
-  chatHistory.push({ role: "user", parts: [{ text: userPrompt }] });
-  
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-    
-    let systemRules = "";
-    
-    if (activeScriptData) {
-      systemRules = `You are an expert Roblox Lua debugger. The user is currently editing a script named "${activeScriptData.name}". 
-      Here is the current code inside it:
-      ---
-      ${activeScriptData.source}
-      ---
-      Fix the bugs or add the features the user requests. 
-      Output ONLY the completely rewritten, raw, executable Lua code. Do not include markdown blocks. Do not explain the code.`;
-    } else {
-      systemRules = `You are an expert Roblox Studio Lua code generator. Your ONLY job is to output raw, executable Lua code. 
-      Do NOT include markdown blocks. 
-      CRITICAL RULES: 
-      1. ALWAYS start with a print() statement announcing what you built or modified.
-      2. Use Instance.new() to build static objects.
-      3. Enum.PartType.Ball for spheres. 
-      4. NEVER write infinite 'while true do' loops directly in the main code.
-      5. For loops/behavior, use Instance.new("Script"), set its .Source, and parent it.
-      6. If a script controls core game logic, parent it to game.ServerScriptService.
-      7. SAFE DELETION: Attach an Instance.new("Highlight") colored Red named "AITarget", print a warning, wait for "confirm" to :Destroy().
-      
-      CURRENT ROBLOX GAME STATE:
-      ${currentWorkspaceContext}`;
+// --- THE MULTIPLAYER BRAIN ---
+// Instead of one global variable, we store a unique "room" for every user.
+const sessions = {}; 
+
+// Helper function to get or create a session
+function getSession(pin) {
+    if (!sessions[pin]) {
+        sessions[pin] = {
+            pluginData: { action: "execute", code: "" },
+            currentWorkspaceContext: "No context synced.",
+            activeScriptData: null,
+            chatHistory: [],
+            isPaired: false // Turns true when the web dashboard claims it
+        };
     }
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemRules }] },
-        contents: chatHistory 
-      })
-    });
-
-    const data = await response.json();
-    
-    if (data.error) {
-        chatHistory.pop(); 
-        throw new Error(data.error.message);
-    }
-
-    let rawAiCode = data.candidates[0].content.parts[0].text;
-    rawAiCode = rawAiCode.replace(/```lua/gi, "").replace(/```/g, "").trim();
-
-    chatHistory.push({ role: "model", parts: [{ text: rawAiCode }] });
-
-    if (activeScriptData) {
-      pluginData = { action: "edit", code: rawAiCode };
-      console.log(`? Patch written for script: ${activeScriptData.name}`);
-    } else {
-      pluginData = { action: "execute", code: rawAiCode };
-      console.log("? New code staged for Roblox!");
-    }
-    
-    return { success: true, code: rawAiCode };
-
-  } catch (error) {
-    console.log("? Error:", error.message);
-    return { success: false, error: error.message };
-  }
+    return sessions[pin];
 }
 
-// --- WEB API ROUTES ---
-app.get('/code', (req, res) => res.json(pluginData));
+// --- THE HANDSHAKE ROUTES ---
+
+// 1. Roblox Plugin asks for a new PIN when it starts
+app.get('/api/generate-pin', (req, res) => {
+    // Generate a random 6 digit string (e.g., "492018")
+    const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    getSession(pin); // Initialize the empty room
+    console.log(`🔑 New Pairing PIN generated: ${pin}`);
+    res.json({ pin: pin });
+});
+
+// 2. Web Dashboard claims the PIN to link the accounts
+app.post('/api/pair', (req, res) => {
+    const { pin } = req.body;
+    if (sessions[pin]) {
+        sessions[pin].isPaired = true;
+        res.json({ success: true, message: "Successfully paired to Roblox Studio!" });
+    } else {
+        res.json({ success: false, error: "Invalid or expired PIN." });
+    }
+});
+
+
+// --- THE AI ROUTES (Now requiring a PIN!) ---
+
+async function askGeminiForCode(userPrompt, pin) {
+    const session = getSession(pin);
+    console.log(`\n🧠 Prompt from PIN [${pin}]: "${userPrompt}"`);
+    
+    session.chatHistory.push({ role: "user", parts: [{ text: userPrompt }] });
+    
+    try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+        
+        let systemRules = "";
+        
+        if (session.activeScriptData) {
+            systemRules = `You are an expert Roblox Lua debugger. The user is currently editing a script named "${session.activeScriptData.name}". 
+            Here is the current code inside it:
+            ---
+            ${session.activeScriptData.source}
+            ---
+            Fix the bugs or add the features the user requests. Output ONLY the completely rewritten, raw, executable Lua code.`;
+        } else {
+            systemRules = `You are an expert Roblox Studio Lua code generator. Your ONLY job is to output raw, executable Lua code. Do NOT include markdown blocks. 
+            CURRENT ROBLOX GAME STATE: ${session.currentWorkspaceContext}`;
+        }
+
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                systemInstruction: { parts: [{ text: systemRules }] },
+                contents: session.chatHistory 
+            })
+        });
+
+        const data = await response.json();
+        
+        if (data.error) throw new Error(data.error.message);
+
+        let rawAiCode = data.candidates[0].content.parts[0].text.replace(/```lua/gi, "").replace(/```/g, "").trim();
+
+        session.chatHistory.push({ role: "model", parts: [{ text: rawAiCode }] });
+
+        if (session.activeScriptData) {
+            session.pluginData = { action: "edit", code: rawAiCode };
+        } else {
+            session.pluginData = { action: "execute", code: rawAiCode };
+        }
+        
+        return { success: true, code: rawAiCode };
+
+    } catch (error) {
+        session.chatHistory.pop(); 
+        return { success: false, error: error.message };
+    }
+}
+
+// All endpoints now require a "?pin=123456" in the URL or body!
+app.get('/code', (req, res) => {
+    const pin = req.query.pin;
+    if (!pin || !sessions[pin]) return res.json({ action: "execute", code: "" });
+    res.json(sessions[pin].pluginData);
+});
 
 app.post('/api/prompt', async (req, res) => {
-  const prompt = req.body.prompt;
-  if (!prompt) return res.status(400).json({ error: "No prompt provided" });
-  
-  if (prompt.toLowerCase() === "clear") {
-      chatHistory = [];
-      return res.json({ success: true, code: "-- Memory wiped. Starting fresh!" });
-  }
-  
-  const result = await askGeminiForCode(prompt);
-  res.json(result);
+    const { prompt, pin } = req.body;
+    if (!prompt || !pin) return res.status(400).json({ error: "Missing prompt or PIN" });
+    
+    if (prompt.toLowerCase() === "clear") {
+        getSession(pin).chatHistory = [];
+        return res.json({ success: true, code: "-- Memory wiped." });
+    }
+    
+    const result = await askGeminiForCode(prompt, pin);
+    res.json(result);
 });
 
 app.post('/api/context', (req, res) => {
-  if (req.body && req.body.context) {
-    currentWorkspaceContext = req.body.context;
-    res.json({ success: true });
-  } else {
-    res.status(400).json({ error: "No context provided" });
-  }
+    const { context, pin } = req.body;
+    if (context && pin) {
+        getSession(pin).currentWorkspaceContext = context;
+        res.json({ success: true });
+    } else {
+        res.status(400).json({ error: "Missing data" });
+    }
 });
 
 app.post('/api/select-script', (req, res) => {
-  if (req.body && req.body.name) {
-    activeScriptData = req.body;
-  } else {
-    activeScriptData = null;
-  }
-  res.json({ success: true });
+    const { name, source, pin } = req.body;
+    if (pin) {
+        getSession(pin).activeScriptData = name ? { name, source } : null;
+        res.json({ success: true });
+    } else {
+        res.status(400).json({ error: "Missing PIN" });
+    }
 });
 
 app.get('/api/select-script', (req, res) => {
-  res.json(activeScriptData || { name: null });
+    const pin = req.query.pin;
+    if (!pin || !sessions[pin]) return res.json({ name: null });
+    res.json(sessions[pin].activeScriptData || { name: null });
 });
 
-// --- START UP ---
-// Cloud hosts (like Render) assign their own ports dynamically using process.env.PORT
 const PORT = process.env.PORT || 3000; 
 app.listen(PORT, () => {
-  console.log("====================================");
-  console.log(`?? RoPilot Cloud Engine LIVE on port ${PORT}!`);
-  console.log("====================================");
+    console.log("====================================");
+    console.log(`🌐 RoPilot MULTIPLAYER Engine LIVE on port ${PORT}!`);
+    console.log("====================================");
 });
