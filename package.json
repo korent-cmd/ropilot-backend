@@ -1,14 +1,18 @@
 {
-  "name": "ropilot-backend",
+  "name": "ropilot-engine",
   "version": "1.0.0",
-  "description": "RoPilot Cloud Engine",
+  "description": "The multiplayer cloud engine and API router for RoPilot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.39.3",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2"
-  }
+    "dotenv": "^16.4.1",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2"
+  },
+  "author": "RoPilot Founder",
+  "license": "MIT"
 }
