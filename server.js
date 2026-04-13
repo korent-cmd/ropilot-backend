@@ -11,13 +11,13 @@ app.use(express.json());
 // ==========================================
 // 1. SYSTEM SECRETS & CONFIGURATION
 // ==========================================
-const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
+const SUPABASE_URL = '[https://uihfytxdzvbcbqixjpjw.supabase.co](https://uihfytxdzvbcbqixjpjw.supabase.co)';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const DEFAULT_MODEL = 'qwen/qwen-2.5-coder-32b-instruct';
 const baseOpenAI = new OpenAI({
-    baseURL: 'https://polza.ai/api/v1',
+    baseURL: '[https://polza.ai/api/v1](https://polza.ai/api/v1)',
     apiKey: process.env.AI_API_KEY 
 });
 
@@ -68,7 +68,7 @@ app.get('/api/select-script', (req, res) => {
 });
 
 // ==========================================
-// 4. THE AI BRAIN (The Profit Engine)
+// 4. THE AI BRAIN (The Roblox Master Update)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     const { prompt, pin, userId } = req.body;
@@ -81,57 +81,75 @@ app.post('/api/prompt', async (req, res) => {
         if (error || !profile) return res.status(400).json({ success: false, error: "Database profile not found." });
 
         let aiClient = baseOpenAI;
-        let activeModel = DEFAULT_MODEL; // Default to Qwen
+        let activeModel = DEFAULT_MODEL;
 
-        // B. Handle BYOK (Bring Your Own Key) Bypass
         if (profile.preferred_model === 'byok' && profile.custom_api_key) {
-            console.log(`[AI] User ${userId} is bypassing quotas using BYOK.`);
-            
-            // Allow them to override the model, otherwise fallback to Qwen
-            if (profile.custom_model) {
-                activeModel = profile.custom_model;
-                console.log(`[AI] BYOK Model Override: ${activeModel}`);
-            }
-
+            if (profile.custom_model) activeModel = profile.custom_model;
             aiClient = new OpenAI({
-                baseURL: 'https://polza.ai/api/v1', // Assuming Polza/OpenRouter structure
+                baseURL: '[https://polza.ai/api/v1](https://polza.ai/api/v1)', 
                 apiKey: profile.custom_api_key
             });
         }
 
-        const systemPrompt = `You are BloxNexus, an expert-level Roblox Luau AI assistant.
+        // UPGRADED SYSTEM PROMPT: Forces it to parent to workspace and build complex objects
+        const systemPrompt = `You are BloxNexus, a Master Roblox Luau AI assistant.
 The user wants you to: "${prompt}".
-Here is the Lua script they are currently editing in Studio:
+Here is the Lua script they are currently editing:
 \`\`\`lua
 ${activeSessions[pin].currentScript || "-- Blank Script"}
 \`\`\`
-CRITICAL RULES:
-1. Return ONLY valid Luau code. 
-2. Do NOT include markdown formatting like \`\`\`lua. 
-3. Do NOT explain the code. 
-4. Just write the raw script text so it can be directly injected into Roblox Studio.`;
+CRITICAL ROBLOX RULES:
+1. If the user asks to spawn, create, or make an object, you MUST parent it to the workspace (e.g., \`part.Parent = workspace\`). If you don't do this, the object is invisible!
+2. Write robust, fully functional code. Give objects proper Sizes, Positions, Colors, and Materials.
+3. Provide the COMPLETE Luau script inside a single \`\`\`lua markdown block.
+4. Speak to the user conversationally before the code block to briefly explain what you are doing.`;
 
         console.log(`[AI] Compiling prompt for ${activeModel}...`);
 
         const completion = await aiClient.chat.completions.create({
-            model: activeModel, // Now dynamically reads their custom model!
+            model: activeModel, 
             messages: [{ role: 'user', content: systemPrompt }],
-            temperature: 0.2,
-            max_tokens: 2048
+            temperature: 0.3, 
+            max_tokens: 3000 // Force long responses
         });
 
         if (!completion.choices || !completion.choices[0]) {
              return res.status(500).json({ success: false, error: "The AI engine failed to generate a response." });
         }
 
-        let cleanCode = completion.choices[0].message.content.replace(/```lua/g, '').replace(/```/g, '').trim();
+        const rawResponse = completion.choices[0].message.content;
+        
+        let cleanCode = "";
+        let chatMessage = "";
+        
+        // BULLETPROOF CODE EXTRACTOR (Works even if the AI cuts off mid-sentence)
+        const codeBlockStart = rawResponse.toLowerCase().indexOf('```lua');
+        
+        if (codeBlockStart !== -1) {
+            // Grab everything BEFORE ```lua as the chat message
+            chatMessage = rawResponse.substring(0, codeBlockStart).trim();
+            
+            // Grab everything AFTER ```lua as the code
+            let codeSection = rawResponse.substring(codeBlockStart + 6);
+            const codeBlockEnd = codeSection.indexOf('```');
+            
+            // If it finds the end backticks, cut it there. If not, just take the rest of the string!
+            cleanCode = codeBlockEnd !== -1 ? codeSection.substring(0, codeBlockEnd).trim() : codeSection.trim();
+        } else {
+            // Total fallback if it completely forgets markdown formatting
+            cleanCode = rawResponse.replace(/```/g, '').trim();
+            chatMessage = "Here is the logic you requested.";
+        }
+        
+        if (chatMessage === "") chatMessage = "I've written the logic for you. Pushing to Studio...";
+        if (cleanCode === "") cleanCode = "-- AI failed to generate script logic. Please try again.";
 
         activeSessions[pin].pendingCode = cleanCode;
         
         res.json({ 
             success: true, 
-            message: "Logic compiled. Pushing to Roblox Studio...",
-            code: cleanCode 
+            message: chatMessage,
+            code: cleanCode
         });
 
     } catch (err) {
