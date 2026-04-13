@@ -80,7 +80,6 @@ app.post('/api/prompt', async (req, res) => {
         // A. Verify User & Paywall in Supabase
         const { data: profile, error } = await db.from('profiles').select('*').eq('id', userId).single();
         
-        // 🚨 THIS IS THE NEW ERROR MESSAGE. If it fails, you will see exactly this:
         if (error || !profile) return res.status(400).json({ success: false, error: "Database profile not found." });
 
         let aiClient = baseOpenAI;
@@ -113,7 +112,8 @@ CRITICAL RULES:
         const completion = await aiClient.chat.completions.create({
             model: DEFAULT_MODEL,
             messages: [{ role: 'user', content: systemPrompt }],
-            temperature: 0.2 
+            temperature: 0.2,
+            max_tokens: 2048 // Ensures the AI doesn't cut off long scripts
         });
 
         if (!completion.choices || !completion.choices[0]) {
