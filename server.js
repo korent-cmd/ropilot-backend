@@ -11,13 +11,14 @@ app.use(express.json());
 // ==========================================
 // 1. SYSTEM SECRETS & CONFIGURATION
 // ==========================================
-const SUPABASE_URL = '[https://uihfytxdzvbcbqixjpjw.supabase.co](https://uihfytxdzvbcbqixjpjw.supabase.co)';
+// 🚨 TRIPLE-CHECKED SUPABASE URL 🚨
+const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const DEFAULT_MODEL = 'qwen/qwen-2.5-coder-32b-instruct';
 const baseOpenAI = new OpenAI({
-    baseURL: '[https://polza.ai/api/v1](https://polza.ai/api/v1)',
+    baseURL: 'https://polza.ai/api/v1',
     apiKey: process.env.AI_API_KEY 
 });
 
@@ -68,7 +69,7 @@ app.get('/api/select-script', (req, res) => {
 });
 
 // ==========================================
-// 4. THE AI BRAIN (The Roblox Master Update)
+// 4. THE AI BRAIN (Roblox Master + Splitter)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     const { prompt, pin, userId } = req.body;
@@ -86,12 +87,11 @@ app.post('/api/prompt', async (req, res) => {
         if (profile.preferred_model === 'byok' && profile.custom_api_key) {
             if (profile.custom_model) activeModel = profile.custom_model;
             aiClient = new OpenAI({
-                baseURL: '[https://polza.ai/api/v1](https://polza.ai/api/v1)', 
+                baseURL: 'https://polza.ai/api/v1', 
                 apiKey: profile.custom_api_key
             });
         }
 
-        // UPGRADED SYSTEM PROMPT: Forces it to parent to workspace and build complex objects
         const systemPrompt = `You are BloxNexus, a Master Roblox Luau AI assistant.
 The user wants you to: "${prompt}".
 Here is the Lua script they are currently editing:
@@ -110,7 +110,7 @@ CRITICAL ROBLOX RULES:
             model: activeModel, 
             messages: [{ role: 'user', content: systemPrompt }],
             temperature: 0.3, 
-            max_tokens: 3000 // Force long responses
+            max_tokens: 3000 
         });
 
         if (!completion.choices || !completion.choices[0]) {
@@ -122,7 +122,7 @@ CRITICAL ROBLOX RULES:
         let cleanCode = "";
         let chatMessage = "";
         
-        // BULLETPROOF CODE EXTRACTOR (Works even if the AI cuts off mid-sentence)
+        // BULLETPROOF CODE EXTRACTOR
         const codeBlockStart = rawResponse.toLowerCase().indexOf('```lua');
         
         if (codeBlockStart !== -1) {
@@ -133,7 +133,7 @@ CRITICAL ROBLOX RULES:
             let codeSection = rawResponse.substring(codeBlockStart + 6);
             const codeBlockEnd = codeSection.indexOf('```');
             
-            // If it finds the end backticks, cut it there. If not, just take the rest of the string!
+            // Cut at the closing backticks if they exist, otherwise take the rest
             cleanCode = codeBlockEnd !== -1 ? codeSection.substring(0, codeBlockEnd).trim() : codeSection.trim();
         } else {
             // Total fallback if it completely forgets markdown formatting
