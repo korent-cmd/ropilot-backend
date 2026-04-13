@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const OpenAI = require('openai'); // Official SDK for Polza AI
+const OpenAI = require('openai'); 
 
 const app = express();
 app.use(cors({ origin: '*' }));
@@ -37,7 +37,7 @@ app.get('/code', (req, res) => {
     const pin = req.query.pin;
     if (activeSessions[pin] && activeSessions[pin].pendingCode) {
         const codeToSend = activeSessions[pin].pendingCode;
-        activeSessions[pin].pendingCode = null; // Clear it so it only runs once
+        activeSessions[pin].pendingCode = null; 
         res.json({ action: "execute", code: codeToSend });
     } else {
         res.json({ action: "none" });
@@ -77,23 +77,28 @@ app.post('/api/prompt', async (req, res) => {
     if (!userId) return res.status(400).json({ success: false, error: "User not authenticated." });
 
     try {
-        // A. Verify User & Paywall in Supabase
         const { data: profile, error } = await db.from('profiles').select('*').eq('id', userId).single();
-        
         if (error || !profile) return res.status(400).json({ success: false, error: "Database profile not found." });
 
         let aiClient = baseOpenAI;
+        let activeModel = DEFAULT_MODEL; // Default to Qwen
 
         // B. Handle BYOK (Bring Your Own Key) Bypass
         if (profile.preferred_model === 'byok' && profile.custom_api_key) {
             console.log(`[AI] User ${userId} is bypassing quotas using BYOK.`);
+            
+            // Allow them to override the model, otherwise fallback to Qwen
+            if (profile.custom_model) {
+                activeModel = profile.custom_model;
+                console.log(`[AI] BYOK Model Override: ${activeModel}`);
+            }
+
             aiClient = new OpenAI({
-                baseURL: 'https://polza.ai/api/v1', 
+                baseURL: 'https://polza.ai/api/v1', // Assuming Polza/OpenRouter structure
                 apiKey: profile.custom_api_key
             });
         }
 
-        // C. Build the Developer Prompt
         const systemPrompt = `You are BloxNexus, an expert-level Roblox Luau AI assistant.
 The user wants you to: "${prompt}".
 Here is the Lua script they are currently editing in Studio:
@@ -106,24 +111,21 @@ CRITICAL RULES:
 3. Do NOT explain the code. 
 4. Just write the raw script text so it can be directly injected into Roblox Studio.`;
 
-        console.log(`[AI] Compiling prompt for Qwen 2.5 Coder via Polza AI...`);
+        console.log(`[AI] Compiling prompt for ${activeModel}...`);
 
-        // D. Call Polza AI
         const completion = await aiClient.chat.completions.create({
-            model: DEFAULT_MODEL,
+            model: activeModel, // Now dynamically reads their custom model!
             messages: [{ role: 'user', content: systemPrompt }],
             temperature: 0.2,
-            max_tokens: 2048 // Ensures the AI doesn't cut off long scripts
+            max_tokens: 2048
         });
 
         if (!completion.choices || !completion.choices[0]) {
              return res.status(500).json({ success: false, error: "The AI engine failed to generate a response." });
         }
 
-        // E. Clean the output
         let cleanCode = completion.choices[0].message.content.replace(/```lua/g, '').replace(/```/g, '').trim();
 
-        // F. Stage the code for Roblox Studio to grab
         activeSessions[pin].pendingCode = cleanCode;
         
         res.json({ 
