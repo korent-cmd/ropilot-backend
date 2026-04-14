@@ -15,10 +15,12 @@ const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const DEFAULT_MODEL = 'qwen/qwen-2.5-coder-32b-instruct';
+// Updated to the requested 9B model
+const DEFAULT_MODEL = 'qwen/qwen3.5-9b';
 const baseOpenAI = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
-    apiKey: process.env.AI_API_KEY 
+    apiKey: process.env.AI_API_KEY,
+    timeout: 60000 
 });
 
 const activeSessions = {};
@@ -39,9 +41,7 @@ app.get('/code', (req, res) => {
         const codeToSend = activeSessions[pin].pendingCode;
         activeSessions[pin].pendingCode = null; 
         res.json({ action: "execute", code: codeToSend });
-    } else {
-        res.json({ action: "none" });
-    }
+    } else { res.json({ action: "none" }); }
 });
 
 // ==========================================
@@ -53,18 +53,14 @@ app.post('/api/pair', (req, res) => {
         activeSessions[pin].connected = true;
         console.log(`[AUTH] Web App paired successfully with PIN: ${pin}`);
         res.json({ success: true });
-    } else {
-        res.status(400).json({ success: false, error: "Invalid or expired PIN. Generate a new one in Studio." });
-    }
+    } else { res.status(400).json({ success: false, error: "Invalid or expired PIN. Generate a new one in Studio." }); }
 });
 
 app.get('/api/select-script', (req, res) => {
     const { pin } = req.query;
     if (activeSessions[pin] && activeSessions[pin].currentScript) {
         res.json({ source: activeSessions[pin].currentScript, name: "Studio_Script" });
-    } else {
-        res.json({ source: null });
-    }
+    } else { res.json({ source: null }); }
 });
 
 // ==========================================
@@ -87,20 +83,20 @@ app.post('/api/prompt', async (req, res) => {
             if (profile.custom_model) activeModel = profile.custom_model;
             aiClient = new OpenAI({
                 baseURL: 'https://polza.ai/api/v1', 
-                apiKey: profile.custom_api_key
+                apiKey: profile.custom_api_key,
+                timeout: 60000
             });
         }
 
-        // 🚨 THE MASTER ROBLOX INSTRUCTION SET 🚨
-        const systemPrompt = `You are BloxNexus, an elite, senior-level Roblox Luau Architect.
-The user wants you to: "${prompt}".
+        const systemPrompt = `You are BloxNexus AI, an elite Roblox Engine Architect. 
+User wants: "${prompt}".
 
-CRITICAL DIRECTIVES:
-1. NEVER LEAVE CODE UNFINISHED. You must write the complete, 100% working script from start to finish. Do not use placeholders like "-- rest of code here".
-2. PHYSICAL SPAWNING: If creating an object, you MUST parent it to the workspace (e.g., \`object.Parent = workspace\`).
-3. LUAU SYNTAX: You must use proper Roblox data types. Use \`Vector3.new(x, y, z)\` for Size and Position. Use \`CFrame.new()\` for rotation. NEVER just write "Vector".
-4. WEAPONS/TOOLS: If asked to make a sword or tool, create a "Tool" Instance, create a "Part" named "Handle" inside it, and parent the Tool to \`game.Players.LocalPlayer.Backpack\` or \`workspace\`.
-5. Speak conversationally for exactly 1-2 sentences to explain what you built, then provide the complete code inside ONE \`\`\`lua markdown block.`;
+CRITICAL INSTRUCTIONS:
+1. GENERATOR MODE: If the user wants a Model/System (like a sword, car, or building), write a single Luau script that programmatically creates the Model, its Parts, and any necessary Scripts (use 'Instance.new("Script")' and set their .Source property).
+2. PHYSICAL SPAWNING: All generated parts MUST be parented to 'workspace'.
+3. WEAPONS/TOOLS: Tools must be parented to game.Players.LocalPlayer.Backpack.
+4. SYNTAX: Use Vector3.new() for all sizes/positions. Use task.wait() instead of wait().
+5. OUTPUT: ONE short sentence explaining what you built, then ONE code block containing the full script.`;
 
         console.log(`[AI] Compiling prompt for ${activeModel}...`);
 
@@ -108,8 +104,8 @@ CRITICAL DIRECTIVES:
             model: activeModel, 
             messages: [{ role: 'user', content: systemPrompt }],
             temperature: 0.2, 
-            max_tokens: 4000,             // Legacy API support
-            max_completion_tokens: 4000   // New OpenAI SDK support
+            max_tokens: 4000,
+            max_completion_tokens: 4000
         });
 
         if (!completion.choices || !completion.choices[0]) {
@@ -130,7 +126,7 @@ CRITICAL DIRECTIVES:
             cleanCode = codeBlockEnd !== -1 ? codeSection.substring(0, codeBlockEnd).trim() : codeSection.trim();
         } else {
             cleanCode = rawResponse.replace(/```/g, '').trim();
-            chatMessage = "Here is the logic you requested.";
+            chatMessage = "Logic compiled. Pushing to Studio...";
         }
         
         if (chatMessage === "") chatMessage = "I've written the logic for you. Pushing to Studio...";
@@ -145,10 +141,10 @@ CRITICAL DIRECTIVES:
         });
 
     } catch (err) {
-        console.error("[SERVER] Fatal Error during prompt execution:", err);
-        res.status(500).json({ success: false, error: "Server processing error. Check backend logs." });
+        console.error("[SERVER] Error during prompt execution:", err);
+        res.status(500).json({ success: false, error: "API Timeout - The model took too long to respond, or the connection dropped." });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 BloxNexus Engine live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Engine Live on port ${PORT}`));
