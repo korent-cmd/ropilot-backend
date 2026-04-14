@@ -15,8 +15,8 @@ const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Updated to the requested 9B model
-const DEFAULT_MODEL = 'qwen/qwen3.5-9b';
+// Swapped to Kat Coder Pro V2
+const DEFAULT_MODEL = 'kwaipilot/kat-coder-pro-v2';
 const baseOpenAI = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
     apiKey: process.env.AI_API_KEY,
@@ -31,7 +31,6 @@ const activeSessions = {};
 app.get('/api/generate-pin', (req, res) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     activeSessions[pin] = { connected: false, pendingCode: null, currentScript: null };
-    console.log(`[AUTH] New Studio PIN generated: ${pin}`);
     res.json({ pin });
 });
 
@@ -51,7 +50,6 @@ app.post('/api/pair', (req, res) => {
     const { pin } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].connected = true;
-        console.log(`[AUTH] Web App paired successfully with PIN: ${pin}`);
         res.json({ success: true });
     } else { res.status(400).json({ success: false, error: "Invalid or expired PIN. Generate a new one in Studio." }); }
 });
@@ -64,7 +62,7 @@ app.get('/api/select-script', (req, res) => {
 });
 
 // ==========================================
-// 4. THE AI BRAIN (The Architect Directive)
+// 4. THE AI BRAIN (Chain of Thought Update)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     const { prompt, pin, userId } = req.body;
@@ -88,22 +86,25 @@ app.post('/api/prompt', async (req, res) => {
             });
         }
 
+        // 🚨 NEW PROMPT: Forces the AI to review its own syntax before outputting code 🚨
         const systemPrompt = `You are BloxNexus AI, an elite Roblox Engine Architect. 
 User wants: "${prompt}".
 
-CRITICAL INSTRUCTIONS:
-1. GENERATOR MODE: If the user wants a Model/System (like a sword, car, or building), write a single Luau script that programmatically creates the Model, its Parts, and any necessary Scripts (use 'Instance.new("Script")' and set their .Source property).
-2. PHYSICAL SPAWNING: All generated parts MUST be parented to 'workspace'.
-3. WEAPONS/TOOLS: Tools must be parented to game.Players.LocalPlayer.Backpack.
-4. SYNTAX: Use Vector3.new() for all sizes/positions. Use task.wait() instead of wait().
-5. OUTPUT: ONE short sentence explaining what you built, then ONE code block containing the full script.`;
+CRITICAL "CHAIN OF THOUGHT" INSTRUCTIONS:
+1. PLAN & REVIEW: Before writing the final code, briefly state your plan. You MUST explicitly double-check your logic for stray typos (like a random letter at the start), missing 'end' statements, and proper Luau syntax.
+2. GENERATOR MODE: Write a single Luau script that programmatically creates Models, Parts, and Scripts (using Instance.new).
+3. PHYSICAL SPAWNING: Parent all physical parts to 'workspace'. Tools go to game.Players.LocalPlayer.Backpack.
+4. SYNTAX: Use Vector3.new() for sizes/positions. Use task.wait() instead of wait().
+5. OUTPUT FORMAT: 
+   First, write a 2-3 sentence summary of your plan and confirm the syntax is checked.
+   Second, provide exactly ONE \`\`\`lua markdown block containing the final, bug-free script.`;
 
         console.log(`[AI] Compiling prompt for ${activeModel}...`);
 
         const completion = await aiClient.chat.completions.create({
             model: activeModel, 
             messages: [{ role: 'user', content: systemPrompt }],
-            temperature: 0.2, 
+            temperature: 0.2, // Kept low to ensure strict syntax adherence
             max_tokens: 4000,
             max_completion_tokens: 4000
         });
