@@ -29,7 +29,7 @@ const activeSessions = {};
 // ==========================================
 app.get('/api/generate-pin', (req, res) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
-    activeSessions[pin] = { connected: false, pendingCode: null, currentScript: null, currentScriptName: null };
+    activeSessions[pin] = { connected: false, pendingCode: null, currentScript: null, currentScriptName: null, architecture: null };
     console.log(`[AUTH] New Studio PIN generated: ${pin}`);
     res.json({ pin });
 });
@@ -63,17 +63,18 @@ app.get('/api/select-script', (req, res) => {
     } else { res.json({ source: null }); }
 });
 
-// The Roblox Plugin calls this to SEND the active script
+// The Roblox Plugin calls this to SEND the active script & architecture map
 app.post('/api/select-script', (req, res) => {
-    const { pin, source, script, name } = req.body;
+    const { pin, source, script, name, architecture } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].currentScript = source || script;
         activeSessions[pin].currentScriptName = name;
+        activeSessions[pin].architecture = architecture; // 🚨 Store the God-Mode Map
         res.json({ success: true });
     } else { res.json({ success: false }); }
 });
 
-// 🚨 THE MANUAL INJECT ENDPOINT (Called when you click "Approve") 🚨
+// The Manual Inject Endpoint (Called when you click "Approve" in the web UI)
 app.post('/api/inject', (req, res) => {
     const { pin, code } = req.body;
     if (activeSessions[pin]) {
@@ -98,7 +99,7 @@ app.get('/api/messages/:chatId', async (req, res) => {
 });
 
 // ==========================================
-// 4. THE AI BRAIN (Context-Aware Editor)
+// 4. THE AI BRAIN (God Mode + Context Aware)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, userId, chatId } = req.body;
@@ -160,9 +161,14 @@ B. Confirm you are outputting the full, complete script without placeholders.
 
         const messages = [{ role: 'system', content: systemPrompt }];
         
-        // Inject the active script into the context if it exists
+        // 🚨 GOD MODE: Inject the Game Architecture Map 🚨
+        if (activeSessions[pin].architecture) {
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below. Use this to understand where items, remote events, and scripts are located:\n\n${activeSessions[pin].architecture}]` });
+        }
+
+        // Inject the currently open script
         if (activeSessions[pin].currentScript && activeSessions[pin].currentScript.length > 10) {
-            messages.push({ role: 'system', content: `[SYSTEM: The user currently has this script open in Roblox Studio named '${activeSessions[pin].currentScriptName}':]\n\`\`\`lua\n${activeSessions[pin].currentScript}\n\`\`\`` });
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Roblox Studio named '${activeSessions[pin].currentScriptName}':]\n\`\`\`lua\n${activeSessions[pin].currentScript}\n\`\`\`` });
         }
 
         history.forEach(msg => {
