@@ -8,14 +8,10 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// ==========================================
-// 1. SYSTEM SECRETS & CONFIGURATION
-// ==========================================
 const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Swapped to Kat Coder Pro V2
 const DEFAULT_MODEL = 'kwaipilot/kat-coder-pro-v2';
 const baseOpenAI = new OpenAI({
     baseURL: 'https://polza.ai/api/v1',
@@ -25,9 +21,7 @@ const baseOpenAI = new OpenAI({
 
 const activeSessions = {};
 
-// ==========================================
-// 2. ROBLOX PLUGIN HOOKS
-// ==========================================
+// --- ROBLOX & PAIRING HOOKS ---
 app.get('/api/generate-pin', (req, res) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     activeSessions[pin] = { connected: false, pendingCode: null, currentScript: null };
@@ -43,15 +37,12 @@ app.get('/code', (req, res) => {
     } else { res.json({ action: "none" }); }
 });
 
-// ==========================================
-// 3. WEB APP HOOKS
-// ==========================================
 app.post('/api/pair', (req, res) => {
     const { pin } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].connected = true;
         res.json({ success: true });
-    } else { res.status(400).json({ success: false, error: "Invalid or expired PIN. Generate a new one in Studio." }); }
+    } else { res.status(400).json({ success: false, error: "Invalid PIN" }); }
 });
 
 app.get('/api/select-script', (req, res) => {
@@ -61,63 +52,76 @@ app.get('/api/select-script', (req, res) => {
     } else { res.json({ source: null }); }
 });
 
-// ==========================================
-// 4. THE AI BRAIN (Chain of Thought Update)
-// ==========================================
+// --- CHAT HISTORY HOOKS ---
+app.get('/api/chats/:userId', async (req, res) => {
+    const { data, error } = await db.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
+    res.json({ success: !error, chats: data || [] });
+});
+
+app.get('/api/messages/:chatId', async (req, res) => {
+    const { data, error } = await db.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
+    res.json({ success: !error, messages: data || [] });
+});
+
+// --- THE AI BRAIN (With Memory) ---
 app.post('/api/prompt', async (req, res) => {
-    const { prompt, pin, userId } = req.body;
+    let { prompt, pin, userId, chatId } = req.body;
 
     if (!activeSessions[pin]) return res.status(400).json({ success: false, error: "Roblox Studio is not connected." });
     if (!userId) return res.status(400).json({ success: false, error: "User not authenticated." });
 
     try {
-        const { data: profile, error } = await db.from('profiles').select('*').eq('id', userId).single();
-        if (error || !profile) return res.status(400).json({ success: false, error: "Database profile not found." });
-
+        const { data: profile } = await db.from('profiles').select('*').eq('id', userId).single();
         let aiClient = baseOpenAI;
         let activeModel = DEFAULT_MODEL;
 
-        if (profile.preferred_model === 'byok' && profile.custom_api_key) {
+        if (profile && profile.preferred_model === 'byok' && profile.custom_api_key) {
             if (profile.custom_model) activeModel = profile.custom_model;
-            aiClient = new OpenAI({
-                baseURL: 'https://polza.ai/api/v1', 
-                apiKey: profile.custom_api_key,
-                timeout: 60000
-            });
+            aiClient = new OpenAI({ baseURL: 'https://polza.ai/api/v1', apiKey: profile.custom_api_key, timeout: 60000 });
         }
 
-        // 🚨 NEW PROMPT: Forces the AI to review its own syntax before outputting code 🚨
-        const systemPrompt = `You are BloxNexus AI, an elite Roblox Engine Architect. 
-User wants: "${prompt}".
+        // 1. Manage Chat Session
+        if (!chatId) {
+            const title = prompt.length > 25 ? prompt.substring(0, 25) + '...' : prompt;
+            const { data: newChat } = await db.from('chats').insert({ user_id: userId, title }).select().single();
+            chatId = newChat.id;
+        }
 
-CRITICAL "CHAIN OF THOUGHT" INSTRUCTIONS:
-1. PLAN & REVIEW: Before writing the final code, briefly state your plan. You MUST explicitly double-check your logic for stray typos (like a random letter at the start), missing 'end' statements, and proper Luau syntax.
-2. GENERATOR MODE: Write a single Luau script that programmatically creates Models, Parts, and Scripts (using Instance.new).
-3. PHYSICAL SPAWNING: Parent all physical parts to 'workspace'. Tools go to game.Players.LocalPlayer.Backpack.
-4. SYNTAX: Use Vector3.new() for sizes/positions. Use task.wait() instead of wait().
-5. OUTPUT FORMAT: 
-   First, write a 2-3 sentence summary of your plan and confirm the syntax is checked.
-   Second, provide exactly ONE \`\`\`lua markdown block containing the final, bug-free script.`;
+        // 2. Save User Message
+        await db.from('messages').insert({ chat_id: chatId, role: 'user', content: prompt });
 
-        console.log(`[AI] Compiling prompt for ${activeModel}...`);
+        // 3. Fetch History (Limit to last 10 messages so cheap models don't crash)
+        const { data: history } = await db.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(10);
+        history.reverse(); 
+
+        const systemPrompt = `You are BloxNexus, an elite Roblox Luau Architect.
+CRITICAL DIRECTIVES:
+1. PHYSICAL SPAWNING: Parent all new parts to 'workspace'. Tools go to game.Players.LocalPlayer.Backpack.
+2. SYNTAX: Use Vector3.new(), task.wait().
+3. OUTPUT SCHEMA: Write a 1-2 sentence plan checking your syntax, then output exactly ONE \`\`\`lua block containing the full script.`;
+
+        // 4. Construct Context
+        const messages = [{ role: 'system', content: systemPrompt }];
+        history.forEach(msg => {
+            if (msg.role === 'user') {
+                messages.push({ role: 'user', content: msg.content });
+            } else {
+                let aiContent = msg.content;
+                if (msg.code) aiContent += `\n\`\`\`lua\n${msg.code}\n\`\`\``;
+                messages.push({ role: 'assistant', content: aiContent });
+            }
+        });
 
         const completion = await aiClient.chat.completions.create({
             model: activeModel, 
-            messages: [{ role: 'user', content: systemPrompt }],
-            temperature: 0.2, // Kept low to ensure strict syntax adherence
-            max_tokens: 4000,
-            max_completion_tokens: 4000
+            messages: messages,
+            temperature: 0.2, 
+            max_tokens: 4000
         });
 
-        if (!completion.choices || !completion.choices[0]) {
-             return res.status(500).json({ success: false, error: "The AI engine failed to generate a response." });
-        }
-
         const rawResponse = completion.choices[0].message.content;
-        
         let cleanCode = "";
         let chatMessage = "";
-        
         const codeBlockStart = rawResponse.toLowerCase().indexOf('```lua');
         
         if (codeBlockStart !== -1) {
@@ -127,23 +131,18 @@ CRITICAL "CHAIN OF THOUGHT" INSTRUCTIONS:
             cleanCode = codeBlockEnd !== -1 ? codeSection.substring(0, codeBlockEnd).trim() : codeSection.trim();
         } else {
             cleanCode = rawResponse.replace(/```/g, '').trim();
-            chatMessage = "Logic compiled. Pushing to Studio...";
+            chatMessage = "Logic compiled.";
         }
-        
-        if (chatMessage === "") chatMessage = "I've written the logic for you. Pushing to Studio...";
-        if (cleanCode === "") cleanCode = "-- AI failed to generate script logic. Please try again.";
 
+        // 5. Save AI Response
+        await db.from('messages').insert({ chat_id: chatId, role: 'ai', content: chatMessage, code: cleanCode });
         activeSessions[pin].pendingCode = cleanCode;
         
-        res.json({ 
-            success: true, 
-            message: chatMessage,
-            code: cleanCode
-        });
+        res.json({ success: true, message: chatMessage, code: cleanCode, chatId: chatId });
 
     } catch (err) {
-        console.error("[SERVER] Error during prompt execution:", err);
-        res.status(500).json({ success: false, error: "API Timeout - The model took too long to respond, or the connection dropped." });
+        console.error(err);
+        res.status(500).json({ success: false, error: "API Timeout." });
     }
 });
 
