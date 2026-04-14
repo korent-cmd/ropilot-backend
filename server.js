@@ -25,11 +25,10 @@ const baseOpenAI = new OpenAI({
 const activeSessions = {};
 
 // ==========================================
-// 2. ROBLOX PLUGIN HOOKS (FIXED: The "Ears" are back)
+// 2. ROBLOX PLUGIN HOOKS & SYNCING
 // ==========================================
 app.get('/api/generate-pin', (req, res) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
-    // Added currentScriptName memory block
     activeSessions[pin] = { connected: false, pendingCode: null, currentScript: null, currentScriptName: null };
     console.log(`[AUTH] New Studio PIN generated: ${pin}`);
     res.json({ pin });
@@ -64,7 +63,7 @@ app.get('/api/select-script', (req, res) => {
     } else { res.json({ source: null }); }
 });
 
-// 🚨 THE MISSING ENDPOINTS: Your Roblox Plugin calls these to SEND the script to the server 🚨
+// The Roblox Plugin calls this to SEND the active script
 app.post('/api/select-script', (req, res) => {
     const { pin, source, script, name } = req.body;
     if (activeSessions[pin]) {
@@ -74,13 +73,15 @@ app.post('/api/select-script', (req, res) => {
     } else { res.json({ success: false }); }
 });
 
-app.post('/api/update-script', (req, res) => {
-    const { pin, source, script, name } = req.body;
+// 🚨 THE MANUAL INJECT ENDPOINT (Called when you click "Approve") 🚨
+app.post('/api/inject', (req, res) => {
+    const { pin, code } = req.body;
     if (activeSessions[pin]) {
-        activeSessions[pin].currentScript = source || script;
-        activeSessions[pin].currentScriptName = name;
+        activeSessions[pin].pendingCode = code; 
         res.json({ success: true });
-    } else { res.json({ success: false }); }
+    } else {
+        res.status(400).json({ success: false, error: "Device not connected." });
+    }
 });
 
 // ==========================================
@@ -97,7 +98,7 @@ app.get('/api/messages/:chatId', async (req, res) => {
 });
 
 // ==========================================
-// 4. THE AI BRAIN (Memory + Chain of Thought)
+// 4. THE AI BRAIN (Context-Aware Editor)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, userId, chatId } = req.body;
@@ -132,16 +133,23 @@ app.post('/api/prompt', async (req, res) => {
         const systemPrompt = `You are BloxNexus, an elite, senior-level Roblox Luau Architect. 
 Your goal is to generate flawless, production-ready Roblox scripts based on the user's request.
 
-=== CORE DIRECTIVES ===
-1. THE VISIBILITY RULE: If creating a physical object (Part, Model, Tool), you MUST explicitly set its Parent to \`workspace\` or \`game.Players.LocalPlayer.Backpack\`.
-2. GENERATOR MODE: Write a single Luau script that programmatically creates Models, Parts, and Scripts (using Instance.new).
-3. COMPLETENESS: You are forbidden from using placeholders like "-- rest of code here". Write the entire script.
-4. MODERN LUAU: Use \`task.wait()\` instead of \`wait()\`. Use \`Vector3.new()\` and \`CFrame.new()\` correctly. 
+=== THE TWO MODES ===
+Read the user's request and the code they provide in the chat history.
+
+MODE A - "GENERATOR": If the user is asking you to create something NEW from scratch:
+1. Write a single Luau script that programmatically creates Models, Parts, and Scripts (using Instance.new).
+2. You MUST explicitly set the Parent of all physical objects to \`workspace\` or \`game.Players.LocalPlayer.Backpack\`.
+
+MODE B - "EDITOR": If the user asks you to modify, fix, or add features to EXISTING code:
+1. Read the code they provided.
+2. Locate the specific area that needs changing.
+3. Output the ENTIRE updated script, from the first line to the last line. Do not use placeholders like "-- rest of code here". 
+4. Do NOT recreate the object with Instance.new unless the user explicitly asks for it. Just modify the logic/properties of the code provided.
 
 === CHAIN OF THOUGHT PROTOCOL ===
 Before writing ANY code, execute a "Safety Check" in plain text. In exactly 2 to 3 sentences:
-A. State your plan for the script.
-B. Explicitly confirm that you have checked your logic for stray characters, missing 'end' statements, and proper variable definitions.
+A. State your plan.
+B. Confirm you are outputting the full, complete script without placeholders.
 
 === OUTPUT SCHEMA ===
 [Your 2-3 sentence Safety Check and Plan goes here]
@@ -151,6 +159,12 @@ B. Explicitly confirm that you have checked your logic for stray characters, mis
 \`\`\``;
 
         const messages = [{ role: 'system', content: systemPrompt }];
+        
+        // Inject the active script into the context if it exists
+        if (activeSessions[pin].currentScript && activeSessions[pin].currentScript.length > 10) {
+            messages.push({ role: 'system', content: `[SYSTEM: The user currently has this script open in Roblox Studio named '${activeSessions[pin].currentScriptName}':]\n\`\`\`lua\n${activeSessions[pin].currentScript}\n\`\`\`` });
+        }
+
         history.forEach(msg => {
             if (msg.role === 'user') {
                 messages.push({ role: 'user', content: msg.content });
@@ -191,12 +205,10 @@ B. Explicitly confirm that you have checked your logic for stray characters, mis
             chatMessage = "Logic compiled. Pushing to Studio...";
         }
         
-        if (chatMessage === "") chatMessage = "I've written the logic for you. Pushing to Studio...";
+        if (chatMessage === "") chatMessage = "I've written the logic for you. Please review.";
         if (cleanCode === "") cleanCode = "-- AI failed to generate script logic. Please try again.";
 
         await db.from('messages').insert({ chat_id: chatId, role: 'ai', content: chatMessage, code: cleanCode });
-        
-        activeSessions[pin].pendingCode = cleanCode;
         
         res.json({ 
             success: true, 
