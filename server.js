@@ -107,7 +107,7 @@ app.post('/api/inject', (req, res) => {
 });
 
 // ==========================================
-// 3. CHAT HISTORY HOOKS (Persistent Memory)
+// 3. CHAT HISTORY & WORKSPACE HOOKS
 // ==========================================
 app.get('/api/chats/:userId', async (req, res) => {
     const { data, error } = await db.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
@@ -121,6 +121,13 @@ app.get('/api/messages/:chatId', async (req, res) => {
 
 app.delete('/api/chats/:chatId', async (req, res) => {
     const { error } = await db.from('chats').delete().eq('id', req.params.chatId);
+    res.json({ success: !error });
+});
+
+// 🚨 SAVE WORKSPACE PERSONA 🚨
+app.post('/api/chats/:chatId/persona', async (req, res) => {
+    const { persona } = req.body;
+    const { error } = await db.from('chats').update({ persona }).eq('id', req.params.chatId);
     res.json({ success: !error });
 });
 
@@ -157,6 +164,15 @@ app.post('/api/prompt', async (req, res) => {
         const { data: history } = await db.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(10);
         history.reverse(); 
 
+        // 🚨 FETCH CUSTOM PERSONA 🚨
+        let customPersona = "";
+        if (chatId) {
+            const { data: chatData } = await db.from('chats').select('persona').eq('id', chatId).single();
+            if (chatData && chatData.persona) {
+                customPersona = `\n\n=== WORKSPACE PERSONA (CRITICAL OVERRIDE) ===\nThe user has set specific rules for this workspace. You MUST follow them strictly:\n"${chatData.persona}"\n`;
+            }
+        }
+
         const systemPrompt = `You are BloxNexus, an elite, senior-level Roblox Engine Architect and Full-Stack Luau Expert. Your core directive is to engineer production-ready, highly optimized, and bug-free Roblox systems.
 
 === I. ENGINEERING & ARCHITECTURE STANDARDS ===
@@ -189,7 +205,7 @@ Do NOT include any conversational text outside the JSON array.
     "parent": "ServerScriptService" | "StarterPlayerScripts" | "StarterGui" | "workspace" | "ReplicatedStorage", 
     "code": "-- Your complete, bug-free, fully functional Luau code goes here"
   }
-]`;
+]${customPersona}`;
 
         const messages = [{ role: 'system', content: systemPrompt }];
         
