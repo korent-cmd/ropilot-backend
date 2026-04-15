@@ -275,13 +275,20 @@ Do NOT include any conversational text outside the JSON array.
         let files = [];
 
         try {
-            let cleanJsonStr = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
-            parsedData = JSON.parse(cleanJsonStr);
+            // 🚨 AGGRESSIVE JSON EXTRACTION 🚨
+            let jsonMatch = rawResponse.match(/\[[\s\S]*\]/);
+            
+            if (jsonMatch) {
+                let cleanJsonStr = jsonMatch[0];
+                parsedData = JSON.parse(cleanJsonStr);
 
-            parsedData.forEach(item => {
-                if (item.type === 'message') chatMessage = item.content;
-                else if (item.type === 'file') files.push(item);
-            });
+                parsedData.forEach(item => {
+                    if (item.type === 'message') chatMessage = item.content;
+                    else if (item.type === 'file') files.push(item);
+                });
+            } else {
+                throw new Error("No JSON array brackets found");
+            }
         } catch (e) {
             // 🚨 CASUAL CHAT FALLBACK 🚨
             console.log("[SERVER] JSON Parse failed, falling back to raw text.");
@@ -295,7 +302,6 @@ Do NOT include any conversational text outside the JSON array.
 
     } catch (err) {
         console.error("[SERVER] Error during prompt execution:", err);
-        // 🚨 UPGRADED ERROR LOGGING 🚨
         const errorMessage = err.message || "Unknown API issue.";
         res.status(500).json({ success: false, error: `API Connection Failed: ${errorMessage}` });
     }
