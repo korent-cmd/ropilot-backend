@@ -77,16 +77,24 @@ app.post('/api/inject', (req, res) => {
 });
 
 // ==========================================
-// 2. CHAT HISTORY HOOKS
+// 2. CHAT HISTORY HOOKS (Persistent Memory)
 // ==========================================
 app.get('/api/chats/:userId', async (req, res) => {
-    const { data } = await db.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
-    res.json({ success: true, chats: data || [] });
+    const { data, error } = await db.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
+    res.json({ success: !error, chats: data || [] });
 });
 
 app.get('/api/messages/:chatId', async (req, res) => {
-    const { data } = await db.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
-    res.json({ success: true, messages: data || [] });
+    const { data, error } = await db.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
+    res.json({ success: !error, messages: data || [] });
+});
+
+// 🚨 NEW: DELETE CHAT ENDPOINT 🚨
+app.delete('/api/chats/:chatId', async (req, res) => {
+    // Delete messages first, then the chat to prevent database errors
+    await db.from('messages').delete().eq('chat_id', req.params.chatId);
+    const { error } = await db.from('chats').delete().eq('id', req.params.chatId);
+    res.json({ success: !error });
 });
 
 // ==========================================
