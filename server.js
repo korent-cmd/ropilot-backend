@@ -28,7 +28,7 @@ const activeSessions = {};
 // 2. ROBLOX PLUGIN HOOKS (The Bridge)
 // ==========================================
 app.get('/api/generate-pin', (req, res) => {
-    const isDemo = req.query.demo === 'true'; // 🚨 Catch the demo flag
+    const isDemo = req.query.demo === 'true'; 
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     
     activeSessions[pin] = { 
@@ -39,33 +39,40 @@ app.get('/api/generate-pin', (req, res) => {
         currentScriptName: null, 
         architecture: null,
         lastError: null,
-        isDemo: isDemo, // 🚨 Flag the session
-        requestsLeft: isDemo ? 20 : null // 🚨 Set the hard limit
+        isDemo: isDemo, 
+        requestsLeft: isDemo ? 20 : null 
     };
     console.log(`[AUTH] New Studio PIN generated: ${pin} (Demo: ${isDemo})`);
     res.json({ pin });
 });
 
-// Studio polls this to grab approved code OR revert commands
 app.get('/code', (req, res) => {
     const pin = req.query.pin;
     if (activeSessions[pin] && activeSessions[pin].pendingBatch) {
         const batchToSend = activeSessions[pin].pendingBatch;
         const actionToSend = activeSessions[pin].pendingAction || "execute_batch"; 
-        
         activeSessions[pin].pendingBatch = null; 
         activeSessions[pin].pendingAction = null;
-        
         res.json({ action: actionToSend, files: batchToSend });
     } else { 
         res.json({ action: "none" }); 
     }
 });
 
-app.post('/api/pair', (req, res) => {
-    const { pin } = req.body;
+// 🚨 SECURE PAIRING: Fetch tokens from DB on connection 🚨
+app.post('/api/pair', async (req, res) => {
+    const { pin, userId } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].connected = true;
+        
+        // If it's a demo, securely grab their token balance from Supabase
+        if (activeSessions[pin].isDemo && userId) {
+            const { data } = await db.from('profiles').select('demo_tokens').eq('id', userId).single();
+            if (data && data.demo_tokens !== undefined) {
+                activeSessions[pin].requestsLeft = data.demo_tokens;
+            }
+        }
+        
         console.log(`[AUTH] Web App paired successfully with PIN: ${pin}`);
         res.json({ success: true });
     } else { 
@@ -73,28 +80,21 @@ app.post('/api/pair', (req, res) => {
     }
 });
 
-// Web UI polls this to see what you are looking at in Studio (AND catch errors)
 app.get('/api/select-script', (req, res) => {
     const { pin } = req.query;
     if (activeSessions[pin] && activeSessions[pin].currentScript) {
-        
-        // Grab the error if it exists, then instantly delete it from memory so it only triggers once
         const caughtError = activeSessions[pin].lastError || null;
         activeSessions[pin].lastError = null; 
-
         res.json({ 
             source: activeSessions[pin].currentScript, 
             name: activeSessions[pin].currentScriptName || "Studio_Script",
             error: caughtError,
-            isDemo: activeSessions[pin].isDemo, // 🚨 Pass to frontend
-            requestsLeft: activeSessions[pin].requestsLeft // 🚨 Pass to frontend
+            isDemo: activeSessions[pin].isDemo, 
+            requestsLeft: activeSessions[pin].requestsLeft 
         });
-    } else { 
-        res.json({ source: null, error: null }); 
-    }
+    } else { res.json({ source: null, error: null }); }
 });
 
-// Plugin sends what you are looking at + the God-Mode folder map
 app.post('/api/select-script', (req, res) => {
     const { pin, source, script, name, architecture } = req.body;
     if (activeSessions[pin]) {
@@ -102,32 +102,24 @@ app.post('/api/select-script', (req, res) => {
         activeSessions[pin].currentScriptName = name;
         if (architecture) activeSessions[pin].architecture = architecture;
         res.json({ success: true });
-    } else { 
-        res.json({ success: false }); 
-    }
+    } else { res.json({ success: false }); }
 });
 
-// Web UI sends approved code OR revert commands here
 app.post('/api/inject', (req, res) => {
     const { pin, action, files } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].pendingBatch = files; 
         activeSessions[pin].pendingAction = action || "execute_batch"; 
         res.json({ success: true });
-    } else {
-        res.status(400).json({ success: false, error: "Device not connected." });
-    }
+    } else { res.status(400).json({ success: false, error: "Device not connected." }); }
 });
 
-// 🚨 AUTO-DEBUGGER HOOK (Plugin sends errors here) 🚨
 app.post('/api/error', (req, res) => {
     const { pin, error } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].lastError = error;
         res.json({ success: true });
-    } else {
-        res.json({ success: false });
-    }
+    } else { res.json({ success: false }); }
 });
 
 // ==========================================
@@ -148,7 +140,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
     res.json({ success: !error });
 });
 
-// 🚨 SAVE WORKSPACE PERSONA 🚨
 app.post('/api/chats/:chatId/persona', async (req, res) => {
     const { persona } = req.body;
     const { error } = await db.from('chats').update({ persona }).eq('id', req.params.chatId);
@@ -173,15 +164,21 @@ app.post('/api/prompt', async (req, res) => {
         let aiClient = baseOpenAI;
         let activeModel = DEFAULT_MODEL;
 
-        // 🚨 DEMO ENFORCEMENT 🚨
+        // 🚨 SECURE DATABASE DEMO ENFORCEMENT 🚨
         if (session.isDemo) {
-            if (session.requestsLeft <= 0) {
+            let currentDbTokens = profile.demo_tokens !== undefined ? profile.demo_tokens : 20;
+            
+            if (currentDbTokens <= 0) {
                 return res.status(403).json({ success: false, error: "Demo limit reached! Please purchase the full BloxNexus plugin to continue coding." });
             }
-            // Force the default model. Ignore BYOK profile settings.
+            
+            // Deduct the token permanently in Supabase
+            await db.from('profiles').update({ demo_tokens: currentDbTokens - 1 }).eq('id', userId);
+            session.requestsLeft = currentDbTokens - 1; // Update UI memory
             activeModel = DEFAULT_MODEL; 
+            
+            console.log(`[DEMO] PIN ${pin} (User ${userId}) has ${session.requestsLeft} requests left.`);
         } else {
-            // Full version: Allow BYOK
             if (profile.preferred_model === 'byok' && profile.custom_api_key) {
                 if (profile.custom_model) activeModel = profile.custom_model;
                 aiClient = new OpenAI({ baseURL: 'https://polza.ai/api/v1', apiKey: profile.custom_api_key, timeout: 60000 });
@@ -200,7 +197,6 @@ app.post('/api/prompt', async (req, res) => {
         const { data: history } = await db.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(10);
         history.reverse(); 
 
-        // 🚨 FETCH CUSTOM PERSONA 🚨
         let customPersona = "";
         if (chatId) {
             const { data: chatData } = await db.from('chats').select('persona').eq('id', chatId).single();
@@ -245,12 +241,10 @@ Do NOT include any conversational text outside the JSON array.
 
         const messages = [{ role: 'system', content: systemPrompt }];
         
-        // 🚨 Inject God-Mode Map
         if (session.architecture) {
             messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below. Use this to understand where items, remote events, and scripts are located:\n\n${session.architecture}]` });
         }
 
-        // 🚨 Inject Active Script
         if (session.currentScript && session.currentScript.length > 10) {
             messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Roblox Studio named '${session.currentScriptName}':]\n\`\`\`lua\n${session.currentScript}\n\`\`\`` });
         }
@@ -260,10 +254,7 @@ Do NOT include any conversational text outside the JSON array.
                 messages.push({ role: 'user', content: msg.content });
             } else {
                 let aiContent = msg.content;
-                // If the AI message had a JSON batch, feed it back to the context
-                if (msg.code && msg.code.startsWith('[')) {
-                    aiContent += `\n${msg.code}`;
-                }
+                if (msg.code && msg.code.startsWith('[')) { aiContent += `\n${msg.code}`; }
                 messages.push({ role: 'assistant', content: aiContent });
             }
         });
@@ -284,7 +275,6 @@ Do NOT include any conversational text outside the JSON array.
         let files = [];
 
         try {
-            // Strip any accidental markdown formatting the AI might add
             let cleanJsonStr = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
             parsedData = JSON.parse(cleanJsonStr);
 
@@ -297,25 +287,15 @@ Do NOT include any conversational text outside the JSON array.
             return res.status(500).json({ success: false, error: "AI output formatting error. The model failed to strictly follow the JSON schema. Try generating again." });
         }
 
-        // 🚨 Deduct a token if it's a demo session
-        if (session.isDemo) {
-            session.requestsLeft--;
-            console.log(`[DEMO] PIN ${pin} has ${session.requestsLeft} requests left.`);
-        }
-
-        // Save JSON array as string in DB for the Revert/Time Machine functionality
         await db.from('messages').insert({ chat_id: chatId, role: 'ai', content: chatMessage, code: JSON.stringify(files) });
         
-        res.json({ 
-            success: true, 
-            message: chatMessage,
-            files: files,
-            chatId: chatId
-        });
+        res.json({ success: true, message: chatMessage, files: files, chatId: chatId });
 
     } catch (err) {
         console.error("[SERVER] Error during prompt execution:", err);
-        res.status(500).json({ success: false, error: "API Timeout - The model took too long to respond, or the connection dropped." });
+        // 🚨 UPGRADED ERROR LOGGING 🚨
+        const errorMessage = err.message || "Unknown API issue.";
+        res.status(500).json({ success: false, error: `API Connection Failed: ${errorMessage}` });
     }
 });
 
