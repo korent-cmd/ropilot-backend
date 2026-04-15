@@ -180,7 +180,7 @@ Do NOT include any conversational text outside the JSON array.
 [
   {
     "type": "message",
-    "content": "CHAIN OF THOUGHT: Write 3-4 sentences explaining your architectural plan. Explain how you separated the client/server logic, what services you used, and exactly what changes you made so the user understands your genius."
+    "content": "Write 3-4 sentences explaining what you built and your architectural plan. Speak naturally and directly to the user (e.g., 'I have built a robust system for you...'). NEVER use the phrase 'Chain of thought' or act like a robot reading instructions."
   },
   {
     "type": "file",
