@@ -91,8 +91,6 @@ app.get('/api/messages/:chatId', async (req, res) => {
 
 // 🚨 NEW: DELETE CHAT ENDPOINT 🚨
 app.delete('/api/chats/:chatId', async (req, res) => {
-    // Delete messages first, then the chat to prevent database errors
-    await db.from('messages').delete().eq('chat_id', req.params.chatId);
     const { error } = await db.from('chats').delete().eq('id', req.params.chatId);
     res.json({ success: !error });
 });
