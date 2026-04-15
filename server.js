@@ -283,8 +283,10 @@ Do NOT include any conversational text outside the JSON array.
                 else if (item.type === 'file') files.push(item);
             });
         } catch (e) {
-            console.error("Failed to parse JSON:", rawResponse);
-            return res.status(500).json({ success: false, error: "AI output formatting error. The model failed to strictly follow the JSON schema. Try generating again." });
+            // 🚨 CASUAL CHAT FALLBACK 🚨
+            console.log("[SERVER] JSON Parse failed, falling back to raw text.");
+            chatMessage = rawResponse;
+            files = [];
         }
 
         await db.from('messages').insert({ chat_id: chatId, role: 'ai', content: chatMessage, code: JSON.stringify(files) });
