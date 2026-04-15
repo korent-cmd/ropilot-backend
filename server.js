@@ -35,7 +35,8 @@ app.get('/api/generate-pin', (req, res) => {
         pendingAction: null, 
         currentScript: null, 
         currentScriptName: null, 
-        architecture: null 
+        architecture: null,
+        lastError: null // 🚨 AUTO-DEBUGGER STATE
     };
     console.log(`[AUTH] New Studio PIN generated: ${pin}`);
     res.json({ pin });
@@ -68,16 +69,22 @@ app.post('/api/pair', (req, res) => {
     }
 });
 
-// Web UI polls this to see what you are looking at in Studio
+// Web UI polls this to see what you are looking at in Studio (AND catch errors)
 app.get('/api/select-script', (req, res) => {
     const { pin } = req.query;
     if (activeSessions[pin] && activeSessions[pin].currentScript) {
+        
+        // Grab the error if it exists, then instantly delete it from memory so it only triggers once
+        const caughtError = activeSessions[pin].lastError || null;
+        activeSessions[pin].lastError = null; 
+
         res.json({ 
             source: activeSessions[pin].currentScript, 
-            name: activeSessions[pin].currentScriptName || "Studio_Script" 
+            name: activeSessions[pin].currentScriptName || "Studio_Script",
+            error: caughtError // 🚨 BEAM ERROR TO UI
         });
     } else { 
-        res.json({ source: null }); 
+        res.json({ source: null, error: null }); 
     }
 });
 
@@ -103,6 +110,17 @@ app.post('/api/inject', (req, res) => {
         res.json({ success: true });
     } else {
         res.status(400).json({ success: false, error: "Device not connected." });
+    }
+});
+
+// 🚨 AUTO-DEBUGGER HOOK (Plugin sends errors here) 🚨
+app.post('/api/error', (req, res) => {
+    const { pin, error } = req.body;
+    if (activeSessions[pin]) {
+        activeSessions[pin].lastError = error;
+        res.json({ success: true });
+    } else {
+        res.json({ success: false });
     }
 });
 
