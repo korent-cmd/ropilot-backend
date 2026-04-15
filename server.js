@@ -8,6 +8,9 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// ==========================================
+// 1. SYSTEM SECRETS & CONFIGURATION
+// ==========================================
 const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -22,39 +25,63 @@ const baseOpenAI = new OpenAI({
 const activeSessions = {};
 
 // ==========================================
-// 1. ROBLOX PLUGIN HOOKS
+// 2. ROBLOX PLUGIN HOOKS (The Bridge)
 // ==========================================
 app.get('/api/generate-pin', (req, res) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
-    activeSessions[pin] = { connected: false, pendingBatch: null, currentScript: null, currentScriptName: null, architecture: null };
+    activeSessions[pin] = { 
+        connected: false, 
+        pendingBatch: null, 
+        pendingAction: null, 
+        currentScript: null, 
+        currentScriptName: null, 
+        architecture: null 
+    };
     console.log(`[AUTH] New Studio PIN generated: ${pin}`);
     res.json({ pin });
 });
 
+// Studio polls this to grab approved code OR revert commands
 app.get('/code', (req, res) => {
     const pin = req.query.pin;
     if (activeSessions[pin] && activeSessions[pin].pendingBatch) {
         const batchToSend = activeSessions[pin].pendingBatch;
+        const actionToSend = activeSessions[pin].pendingAction || "execute_batch"; 
+        
         activeSessions[pin].pendingBatch = null; 
-        res.json({ action: "execute_batch", files: batchToSend });
-    } else { res.json({ action: "none" }); }
+        activeSessions[pin].pendingAction = null;
+        
+        res.json({ action: actionToSend, files: batchToSend });
+    } else { 
+        res.json({ action: "none" }); 
+    }
 });
 
 app.post('/api/pair', (req, res) => {
     const { pin } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].connected = true;
+        console.log(`[AUTH] Web App paired successfully with PIN: ${pin}`);
         res.json({ success: true });
-    } else { res.status(400).json({ success: false, error: "Invalid PIN." }); }
+    } else { 
+        res.status(400).json({ success: false, error: "Invalid or expired PIN." }); 
+    }
 });
 
+// Web UI polls this to see what you are looking at in Studio
 app.get('/api/select-script', (req, res) => {
     const { pin } = req.query;
     if (activeSessions[pin] && activeSessions[pin].currentScript) {
-        res.json({ source: activeSessions[pin].currentScript, name: activeSessions[pin].currentScriptName || "Studio_Script" });
-    } else { res.json({ source: null }); }
+        res.json({ 
+            source: activeSessions[pin].currentScript, 
+            name: activeSessions[pin].currentScriptName || "Studio_Script" 
+        });
+    } else { 
+        res.json({ source: null }); 
+    }
 });
 
+// Plugin sends what you are looking at + the God-Mode folder map
 app.post('/api/select-script', (req, res) => {
     const { pin, source, script, name, architecture } = req.body;
     if (activeSessions[pin]) {
@@ -62,14 +89,17 @@ app.post('/api/select-script', (req, res) => {
         activeSessions[pin].currentScriptName = name;
         if (architecture) activeSessions[pin].architecture = architecture;
         res.json({ success: true });
-    } else { res.json({ success: false }); }
+    } else { 
+        res.json({ success: false }); 
+    }
 });
 
-// 🚨 UPDATED MANUAL INJECT ENDPOINT (Accepts Array of Files) 🚨
+// Web UI sends approved code OR revert commands here
 app.post('/api/inject', (req, res) => {
-    const { pin, files } = req.body;
+    const { pin, action, files } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].pendingBatch = files; 
+        activeSessions[pin].pendingAction = action || "execute_batch"; 
         res.json({ success: true });
     } else {
         res.status(400).json({ success: false, error: "Device not connected." });
@@ -77,7 +107,7 @@ app.post('/api/inject', (req, res) => {
 });
 
 // ==========================================
-// 2. CHAT HISTORY HOOKS (Persistent Memory)
+// 3. CHAT HISTORY HOOKS (Persistent Memory)
 // ==========================================
 app.get('/api/chats/:userId', async (req, res) => {
     const { data, error } = await db.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
@@ -89,14 +119,13 @@ app.get('/api/messages/:chatId', async (req, res) => {
     res.json({ success: !error, messages: data || [] });
 });
 
-// 🚨 NEW: DELETE CHAT ENDPOINT 🚨
 app.delete('/api/chats/:chatId', async (req, res) => {
     const { error } = await db.from('chats').delete().eq('id', req.params.chatId);
     res.json({ success: !error });
 });
 
 // ==========================================
-// 3. THE MULTI-FILE AI BRAIN
+// 4. THE AI BRAIN (JSON Multi-File Engine)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, userId, chatId } = req.body;
@@ -105,7 +134,9 @@ app.post('/api/prompt', async (req, res) => {
     if (!userId) return res.status(400).json({ success: false, error: "User not authenticated." });
 
     try {
-        const { data: profile } = await db.from('profiles').select('*').eq('id', userId).single();
+        const { data: profile, error: profileErr } = await db.from('profiles').select('*').eq('id', userId).single();
+        if (profileErr || !profile) return res.status(400).json({ success: false, error: "Database profile not found." });
+
         let aiClient = baseOpenAI;
         let activeModel = DEFAULT_MODEL;
 
@@ -116,7 +147,8 @@ app.post('/api/prompt', async (req, res) => {
 
         if (!chatId) {
             const title = prompt.length > 25 ? prompt.substring(0, 25) + '...' : prompt;
-            const { data: newChat } = await db.from('chats').insert({ user_id: userId, title }).select().single();
+            const { data: newChat, error: chatErr } = await db.from('chats').insert({ user_id: userId, title }).select().single();
+            if (chatErr) throw new Error("Failed to create chat session.");
             chatId = newChat.id;
         }
 
@@ -129,7 +161,7 @@ app.post('/api/prompt', async (req, res) => {
 
 === I. ENGINEERING & ARCHITECTURE STANDARDS ===
 1. Modern Luau Only: Always use \`task.wait()\`, \`task.spawn()\`, and proper Service declarations (\`game:GetService()\`). Never use deprecated methods like \`wait()\`.
-2. Strict Separation of Concerns: You have the ability to generate multiple scripts at once. NEVER cram server logic and client input into the same file. Separate them into \`LocalScript\` (Client) and \`Script\` (Server) and bridge them using \`RemoteEvent\`s or \`RemoteFunction\`s in \`ReplicatedStorage\`.
+2. Strict Separation of Concerns: You have the ability to generate multiple scripts at once. NEVER cram server logic and client input into the same file. Separate them into \`LocalScript\` (Client) and \`Script\` (Server) and bridge them using \`RemoteEvent\`s or \`RemoteFunction\`s.
 3. Completeness: NEVER use placeholders like "-- rest of code goes here" or "-- add logic here". You must write 100% complete, fully functional code from the first line to the last.
 
 === II. THE THREE OPERATION MODES ===
@@ -161,16 +193,27 @@ Do NOT include any conversational text outside the JSON array.
 
         const messages = [{ role: 'system', content: systemPrompt }];
         
+        // 🚨 Inject God-Mode Map
         if (activeSessions[pin].architecture) {
-            messages.push({ role: 'system', content: `[GAME ARCHITECTURE]\n${activeSessions[pin].architecture}` });
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below. Use this to understand where items, remote events, and scripts are located:\n\n${activeSessions[pin].architecture}]` });
         }
 
+        // 🚨 Inject Active Script
         if (activeSessions[pin].currentScript && activeSessions[pin].currentScript.length > 10) {
-            messages.push({ role: 'system', content: `[ACTIVE SCRIPT OPEN: ${activeSessions[pin].currentScriptName}]\n\`\`\`lua\n${activeSessions[pin].currentScript}\n\`\`\`` });
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Roblox Studio named '${activeSessions[pin].currentScriptName}':]\n\`\`\`lua\n${activeSessions[pin].currentScript}\n\`\`\`` });
         }
 
         history.forEach(msg => {
-            messages.push({ role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content + (msg.code ? `\n${msg.code}` : '') });
+            if (msg.role === 'user') {
+                messages.push({ role: 'user', content: msg.content });
+            } else {
+                let aiContent = msg.content;
+                // If the AI message had a JSON batch, feed it back to the context
+                if (msg.code && msg.code.startsWith('[')) {
+                    aiContent += `\n${msg.code}`;
+                }
+                messages.push({ role: 'assistant', content: aiContent });
+            }
         });
 
         console.log(`[AI] Compiling JSON prompt for ${activeModel}...`);
@@ -199,10 +242,10 @@ Do NOT include any conversational text outside the JSON array.
             });
         } catch (e) {
             console.error("Failed to parse JSON:", rawResponse);
-            return res.status(500).json({ success: false, error: "AI output formatting error. Please try generating again." });
+            return res.status(500).json({ success: false, error: "AI output formatting error. The model failed to strictly follow the JSON schema. Try generating again." });
         }
 
-        // Save JSON array as string in DB
+        // Save JSON array as string in DB for the Revert/Time Machine functionality
         await db.from('messages').insert({ chat_id: chatId, role: 'ai', content: chatMessage, code: JSON.stringify(files) });
         
         res.json({ 
@@ -213,8 +256,8 @@ Do NOT include any conversational text outside the JSON array.
         });
 
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, error: "API Timeout." });
+        console.error("[SERVER] Error during prompt execution:", err);
+        res.status(500).json({ success: false, error: "API Timeout - The model took too long to respond, or the connection dropped." });
     }
 });
 
