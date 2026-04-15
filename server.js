@@ -28,7 +28,9 @@ const activeSessions = {};
 // 2. ROBLOX PLUGIN HOOKS (The Bridge)
 // ==========================================
 app.get('/api/generate-pin', (req, res) => {
+    const isDemo = req.query.demo === 'true'; // 🚨 Catch the demo flag
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    
     activeSessions[pin] = { 
         connected: false, 
         pendingBatch: null, 
@@ -36,9 +38,11 @@ app.get('/api/generate-pin', (req, res) => {
         currentScript: null, 
         currentScriptName: null, 
         architecture: null,
-        lastError: null // 🚨 AUTO-DEBUGGER STATE
+        lastError: null,
+        isDemo: isDemo, // 🚨 Flag the session
+        requestsLeft: isDemo ? 20 : null // 🚨 Set the hard limit
     };
-    console.log(`[AUTH] New Studio PIN generated: ${pin}`);
+    console.log(`[AUTH] New Studio PIN generated: ${pin} (Demo: ${isDemo})`);
     res.json({ pin });
 });
 
@@ -81,7 +85,9 @@ app.get('/api/select-script', (req, res) => {
         res.json({ 
             source: activeSessions[pin].currentScript, 
             name: activeSessions[pin].currentScriptName || "Studio_Script",
-            error: caughtError // 🚨 BEAM ERROR TO UI
+            error: caughtError,
+            isDemo: activeSessions[pin].isDemo, // 🚨 Pass to frontend
+            requestsLeft: activeSessions[pin].requestsLeft // 🚨 Pass to frontend
         });
     } else { 
         res.json({ source: null, error: null }); 
@@ -158,6 +164,8 @@ app.post('/api/prompt', async (req, res) => {
     if (!activeSessions[pin]) return res.status(400).json({ success: false, error: "Roblox Studio is not connected." });
     if (!userId) return res.status(400).json({ success: false, error: "User not authenticated." });
 
+    const session = activeSessions[pin];
+
     try {
         const { data: profile, error: profileErr } = await db.from('profiles').select('*').eq('id', userId).single();
         if (profileErr || !profile) return res.status(400).json({ success: false, error: "Database profile not found." });
@@ -165,9 +173,19 @@ app.post('/api/prompt', async (req, res) => {
         let aiClient = baseOpenAI;
         let activeModel = DEFAULT_MODEL;
 
-        if (profile.preferred_model === 'byok' && profile.custom_api_key) {
-            if (profile.custom_model) activeModel = profile.custom_model;
-            aiClient = new OpenAI({ baseURL: 'https://polza.ai/api/v1', apiKey: profile.custom_api_key, timeout: 60000 });
+        // 🚨 DEMO ENFORCEMENT 🚨
+        if (session.isDemo) {
+            if (session.requestsLeft <= 0) {
+                return res.status(403).json({ success: false, error: "Demo limit reached! Please purchase the full BloxNexus plugin to continue coding." });
+            }
+            // Force the default model. Ignore BYOK profile settings.
+            activeModel = DEFAULT_MODEL; 
+        } else {
+            // Full version: Allow BYOK
+            if (profile.preferred_model === 'byok' && profile.custom_api_key) {
+                if (profile.custom_model) activeModel = profile.custom_model;
+                aiClient = new OpenAI({ baseURL: 'https://polza.ai/api/v1', apiKey: profile.custom_api_key, timeout: 60000 });
+            }
         }
 
         if (!chatId) {
@@ -228,13 +246,13 @@ Do NOT include any conversational text outside the JSON array.
         const messages = [{ role: 'system', content: systemPrompt }];
         
         // 🚨 Inject God-Mode Map
-        if (activeSessions[pin].architecture) {
-            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below. Use this to understand where items, remote events, and scripts are located:\n\n${activeSessions[pin].architecture}]` });
+        if (session.architecture) {
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below. Use this to understand where items, remote events, and scripts are located:\n\n${session.architecture}]` });
         }
 
         // 🚨 Inject Active Script
-        if (activeSessions[pin].currentScript && activeSessions[pin].currentScript.length > 10) {
-            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Roblox Studio named '${activeSessions[pin].currentScriptName}':]\n\`\`\`lua\n${activeSessions[pin].currentScript}\n\`\`\`` });
+        if (session.currentScript && session.currentScript.length > 10) {
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Roblox Studio named '${session.currentScriptName}':]\n\`\`\`lua\n${session.currentScript}\n\`\`\`` });
         }
 
         history.forEach(msg => {
@@ -277,6 +295,12 @@ Do NOT include any conversational text outside the JSON array.
         } catch (e) {
             console.error("Failed to parse JSON:", rawResponse);
             return res.status(500).json({ success: false, error: "AI output formatting error. The model failed to strictly follow the JSON schema. Try generating again." });
+        }
+
+        // 🚨 Deduct a token if it's a demo session
+        if (session.isDemo) {
+            session.requestsLeft--;
+            console.log(`[DEMO] PIN ${pin} has ${session.requestsLeft} requests left.`);
         }
 
         // Save JSON array as string in DB for the Revert/Time Machine functionality
