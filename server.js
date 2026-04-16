@@ -26,6 +26,18 @@ const activeSessions = {};
 const EXPECTED_PLUGIN_VERSION = "1.1.0"; // 🚨 MASTER VERSION CONTROL
 
 // ==========================================
+// 🚨 STABILITY: HEARTBEAT ENDPOINT 🚨
+// ==========================================
+// UptimeRobot will ping this every 5 minutes to keep Render awake.
+app.get('/health', (req, res) => {
+    res.status(200).json({ 
+        status: 'Online', 
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString() 
+    });
+});
+
+// ==========================================
 // 🚨 SECURITY MIDDLEWARE 🚨
 // ==========================================
 async function requireAuth(req, res, next) {
