@@ -26,6 +26,22 @@ const activeSessions = {};
 const EXPECTED_PLUGIN_VERSION = "1.1.0"; // 🚨 MASTER VERSION CONTROL
 
 // ==========================================
+// 🚨 SECURITY MIDDLEWARE 🚨
+// ==========================================
+async function requireAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ success: false, error: "Access Denied: No Token" });
+    
+    const token = authHeader.split(' ')[1];
+    const { data: { user }, error } = await db.auth.getUser(token);
+    
+    if (error || !user) return res.status(401).json({ success: false, error: "Access Denied: Invalid Token" });
+    
+    req.userId = user.id; // Securely attach the mathematically verified ID
+    next();
+}
+
+// ==========================================
 // 2. ROBLOX PLUGIN HOOKS (The Bridge)
 // ==========================================
 app.get('/api/generate-pin', (req, res) => {
@@ -39,7 +55,7 @@ app.get('/api/generate-pin', (req, res) => {
         currentScript: null, 
         currentScriptName: null, 
         architecture: null,
-        pinnedScripts: {}, // Multi-File Memory
+        pinnedScripts: {}, 
         pluginVersion: "1.0.0",
         isOutdated: false,
         lastError: null,
@@ -63,9 +79,11 @@ app.get('/code', (req, res) => {
     }
 });
 
-// 🚨 SECURE PAIRING: Fetch tokens from DB on connection 🚨
-app.post('/api/pair', async (req, res) => {
-    const { pin, userId } = req.body;
+// 🚨 SECURE PAIRING ROUTE 🚨
+app.post('/api/pair', requireAuth, async (req, res) => {
+    const { pin } = req.body;
+    const userId = req.userId; // Extracted securely from the token
+    
     if (activeSessions[pin]) {
         activeSessions[pin].connected = true;
         
@@ -83,7 +101,6 @@ app.post('/api/pair', async (req, res) => {
     }
 });
 
-// Web UI polls this to update the view
 app.get('/api/select-script', (req, res) => {
     const { pin } = req.query;
     if (activeSessions[pin] && activeSessions[pin].currentScript) {
@@ -102,7 +119,6 @@ app.get('/api/select-script', (req, res) => {
     } else { res.json({ source: null, error: null }); }
 });
 
-// Plugin sends state, architecture, and pinned scripts here
 app.post('/api/select-script', (req, res) => {
     const { pin, source, script, name, architecture, pinnedScripts, version } = req.body;
     if (activeSessions[pin]) {
@@ -124,7 +140,6 @@ app.post('/api/inject', (req, res) => {
         activeSessions[pin].pendingBatch = files; 
         activeSessions[pin].pendingAction = action || "execute_batch"; 
         
-        // 🚨 INSTANT SYNC FIX: Prevent Web UI from flashing old code
         if (action === "execute_batch" && files && files.length > 0) {
             activeSessions[pin].currentScript = files[0].code;
             activeSessions[pin].currentScriptName = files[0].name;
@@ -169,11 +184,13 @@ app.post('/api/chats/:chatId/persona', async (req, res) => {
 // ==========================================
 // 4. THE AI BRAIN (JSON Multi-File Engine)
 // ==========================================
-app.post('/api/prompt', async (req, res) => {
-    let { prompt, pin, userId, chatId } = req.body;
+
+// 🚨 SECURE PROMPT ROUTE 🚨
+app.post('/api/prompt', requireAuth, async (req, res) => {
+    let { prompt, pin, chatId } = req.body;
+    const userId = req.userId; // Extracted securely from the token
 
     if (!activeSessions[pin]) return res.status(400).json({ success: false, error: "Roblox Studio is not connected." });
-    if (!userId) return res.status(400).json({ success: false, error: "User not authenticated." });
 
     const session = activeSessions[pin];
 
@@ -191,6 +208,7 @@ app.post('/api/prompt', async (req, res) => {
             await db.from('profiles').update({ demo_tokens: currentDbTokens - 1 }).eq('id', userId);
             session.requestsLeft = currentDbTokens - 1; 
             activeModel = DEFAULT_MODEL; 
+            console.log(`[DEMO] PIN ${pin} (User ${userId}) has ${session.requestsLeft} requests left.`);
         } else {
             if (profile.preferred_model === 'byok' && profile.custom_api_key) {
                 if (profile.custom_model) activeModel = profile.custom_model;
@@ -262,7 +280,6 @@ Do NOT include any conversational text outside the JSON array.
             messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Studio named '${session.currentScriptName}':]\n\`\`\`lua\n${session.currentScript}\n\`\`\`` });
         }
 
-        // 🚨 PROJECT BRAIN: INJECT MULTI-FILE CONTEXT 🚨
         if (session.pinnedScripts && Object.keys(session.pinnedScripts).length > 0) {
             let multiContext = "[SYSTEM CONTEXT: The user has PINNED the following background files for you to read and understand. Use these to ensure your code integrates perfectly with their existing systems:]\n\n";
             for (const [scriptName, scriptSource] of Object.entries(session.pinnedScripts)) {
@@ -297,7 +314,6 @@ Do NOT include any conversational text outside the JSON array.
         let files = [];
 
         try {
-            // 🚨 AGGRESSIVE JSON EXTRACTION 🚨
             let jsonMatch = rawResponse.match(/\[[\s\S]*\]/);
             
             if (jsonMatch) {
@@ -309,7 +325,6 @@ Do NOT include any conversational text outside the JSON array.
                     else if (item.type === 'file') files.push(item);
                 });
             } else if (rawResponse.includes('[{')) {
-                // 🚨 TRUNCATION CATCHER 🚨
                 throw new Error("TRUNCATED");
             } else {
                 throw new Error("NO_JSON");
@@ -318,7 +333,6 @@ Do NOT include any conversational text outside the JSON array.
             if (e.message === "TRUNCATED" || (e instanceof SyntaxError && rawResponse.includes('[{'))) {
                 return res.status(500).json({ success: false, error: "The generated code was so massive it hit the AI's physical character limit and got cut off! Try asking for fewer items (e.g. 'give me 10 jokes' instead of 150) or ask it to write the code in smaller parts." });
             }
-            // 🚨 CASUAL CHAT FALLBACK 🚨
             console.log("[SERVER] JSON Parse failed, falling back to raw text.");
             chatMessage = rawResponse;
             files = [];
