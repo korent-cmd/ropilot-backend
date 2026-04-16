@@ -8,6 +8,9 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// ==========================================
+// 1. SYSTEM SECRETS & CONFIGURATION
+// ==========================================
 const SUPABASE_URL = 'https://uihfytxdzvbcbqixjpjw.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -20,16 +23,30 @@ const baseOpenAI = new OpenAI({
 });
 
 const activeSessions = {};
+const EXPECTED_PLUGIN_VERSION = "1.1.0"; // 🚨 MASTER VERSION CONTROL
 
+// ==========================================
+// 2. ROBLOX PLUGIN HOOKS (The Bridge)
+// ==========================================
 app.get('/api/generate-pin', (req, res) => {
     const isDemo = req.query.demo === 'true'; 
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     
     activeSessions[pin] = { 
-        connected: false, pendingBatch: null, pendingAction: null, 
-        currentScript: null, currentScriptName: null, architecture: null,
-        lastError: null, isDemo: isDemo, requestsLeft: isDemo ? 20 : null 
+        connected: false, 
+        pendingBatch: null, 
+        pendingAction: null, 
+        currentScript: null, 
+        currentScriptName: null, 
+        architecture: null,
+        pinnedScripts: {}, // Multi-File Memory
+        pluginVersion: "1.0.0",
+        isOutdated: false,
+        lastError: null,
+        isDemo: isDemo, 
+        requestsLeft: isDemo ? 20 : null 
     };
+    console.log(`[AUTH] New Studio PIN generated: ${pin} (Demo: ${isDemo})`);
     res.json({ pin });
 });
 
@@ -41,39 +58,62 @@ app.get('/code', (req, res) => {
         activeSessions[pin].pendingBatch = null; 
         activeSessions[pin].pendingAction = null;
         res.json({ action: actionToSend, files: batchToSend });
-    } else { res.json({ action: "none" }); }
+    } else { 
+        res.json({ action: "none" }); 
+    }
 });
 
+// 🚨 SECURE PAIRING: Fetch tokens from DB on connection 🚨
 app.post('/api/pair', async (req, res) => {
     const { pin, userId } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].connected = true;
+        
         if (activeSessions[pin].isDemo && userId) {
             const { data } = await db.from('profiles').select('demo_tokens').eq('id', userId).single();
-            if (data && data.demo_tokens !== undefined) activeSessions[pin].requestsLeft = data.demo_tokens;
+            if (data && data.demo_tokens !== undefined) {
+                activeSessions[pin].requestsLeft = data.demo_tokens;
+            }
         }
+        
+        console.log(`[AUTH] Web App paired successfully with PIN: ${pin}`);
         res.json({ success: true });
-    } else { res.status(400).json({ success: false, error: "Invalid or expired PIN." }); }
+    } else { 
+        res.status(400).json({ success: false, error: "Invalid or expired PIN." }); 
+    }
 });
 
+// Web UI polls this to update the view
 app.get('/api/select-script', (req, res) => {
     const { pin } = req.query;
     if (activeSessions[pin] && activeSessions[pin].currentScript) {
         const caughtError = activeSessions[pin].lastError || null;
         activeSessions[pin].lastError = null; 
+        
         res.json({ 
-            source: activeSessions[pin].currentScript, name: activeSessions[pin].currentScriptName || "Studio_Script",
-            error: caughtError, isDemo: activeSessions[pin].isDemo, requestsLeft: activeSessions[pin].requestsLeft 
+            source: activeSessions[pin].currentScript, 
+            name: activeSessions[pin].currentScriptName || "Studio_Script",
+            error: caughtError,
+            isDemo: activeSessions[pin].isDemo, 
+            requestsLeft: activeSessions[pin].requestsLeft,
+            isOutdated: activeSessions[pin].isOutdated,
+            pinnedCount: Object.keys(activeSessions[pin].pinnedScripts || {}).length
         });
     } else { res.json({ source: null, error: null }); }
 });
 
+// Plugin sends state, architecture, and pinned scripts here
 app.post('/api/select-script', (req, res) => {
-    const { pin, source, script, name, architecture } = req.body;
+    const { pin, source, script, name, architecture, pinnedScripts, version } = req.body;
     if (activeSessions[pin]) {
         activeSessions[pin].currentScript = source || script;
         activeSessions[pin].currentScriptName = name;
         if (architecture) activeSessions[pin].architecture = architecture;
+        
+        activeSessions[pin].pinnedScripts = pinnedScripts || {};
+        activeSessions[pin].pluginVersion = version || "1.0.0";
+        activeSessions[pin].isOutdated = activeSessions[pin].pluginVersion !== EXPECTED_PLUGIN_VERSION;
+        
         res.json({ success: true });
     } else { res.json({ success: false }); }
 });
@@ -84,7 +124,7 @@ app.post('/api/inject', (req, res) => {
         activeSessions[pin].pendingBatch = files; 
         activeSessions[pin].pendingAction = action || "execute_batch"; 
         
-        // 🚨 INSTANT SYNC FIX: Pre-emptively update server memory so Web UI doesn't flash old code!
+        // 🚨 INSTANT SYNC FIX: Prevent Web UI from flashing old code
         if (action === "execute_batch" && files && files.length > 0) {
             activeSessions[pin].currentScript = files[0].code;
             activeSessions[pin].currentScriptName = files[0].name;
@@ -96,10 +136,15 @@ app.post('/api/inject', (req, res) => {
 
 app.post('/api/error', (req, res) => {
     const { pin, error } = req.body;
-    if (activeSessions[pin]) { activeSessions[pin].lastError = error; res.json({ success: true }); } 
-    else { res.json({ success: false }); }
+    if (activeSessions[pin]) {
+        activeSessions[pin].lastError = error;
+        res.json({ success: true });
+    } else { res.json({ success: false }); }
 });
 
+// ==========================================
+// 3. CHAT HISTORY & WORKSPACE HOOKS
+// ==========================================
 app.get('/api/chats/:userId', async (req, res) => {
     const { data, error } = await db.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
     res.json({ success: !error, chats: data || [] });
@@ -121,8 +166,12 @@ app.post('/api/chats/:chatId/persona', async (req, res) => {
     res.json({ success: !error });
 });
 
+// ==========================================
+// 4. THE AI BRAIN (JSON Multi-File Engine)
+// ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, userId, chatId } = req.body;
+
     if (!activeSessions[pin]) return res.status(400).json({ success: false, error: "Roblox Studio is not connected." });
     if (!userId) return res.status(400).json({ success: false, error: "User not authenticated." });
 
@@ -173,10 +222,18 @@ app.post('/api/prompt', async (req, res) => {
 
 === I. ENGINEERING & ARCHITECTURE STANDARDS ===
 1. Modern Luau Only: Always use \`task.wait()\`, \`task.spawn()\`, and proper Service declarations (\`game:GetService()\`). Never use deprecated methods like \`wait()\`.
-2. Strict Separation of Concerns: Separate server/client logic and bridge them using RemoteEvents.
-3. Completeness: NEVER use placeholders. Write 100% complete, fully functional code.
+2. Strict Separation of Concerns: You have the ability to generate multiple scripts at once. NEVER cram server logic and client input into the same file. Separate them into \`LocalScript\` (Client) and \`Script\` (Server) and bridge them using \`RemoteEvent\`s or \`RemoteFunction\`s.
+3. Completeness: NEVER use placeholders like "-- rest of code goes here" or "-- add logic here". You must write 100% complete, fully functional code from the first line to the last.
+
+=== II. THE THREE OPERATION MODES ===
+Analyze the user's prompt and the provided game architecture to determine your mode:
+
+MODE A - "GENERATOR" (New Systems): Create scalable scripts from scratch. Programmatically build physical items using \`Instance.new\` and parent them correctly.
+MODE B - "EDITOR" (Modifying Code): Read the user's active script. Find the exact logic to change. Output the ENTIRE script from top to bottom with the new features or bug fixes integrated flawlessly.
+MODE C - "UI BUILDER" (2D Interfaces): Generate beautiful menus. Create a \`ScreenGui\` parented to \`StarterGui\`. You MUST use modern UX styling: \`UICorner\` for rounded edges, \`UIStroke\` for outlines, sleek Color3 palettes (default to dark mode unless asked otherwise), and \`UDim2\` for responsive scaling on all screen sizes.
 
 === III. OUTPUT SCHEMA (CRITICAL OVERRIDE) ===
+You are communicating directly with a strict JSON-parsing injection engine. 
 You MUST output YOUR ENTIRE RESPONSE as a single, valid JSON array. 
 Do NOT wrap the JSON in markdown blocks (e.g., no \`\`\`json). Just output the raw brackets [].
 Do NOT include any conversational text outside the JSON array.
@@ -184,32 +241,48 @@ Do NOT include any conversational text outside the JSON array.
 [
   {
     "type": "message",
-    "content": "Speak naturally to the user explaining the architecture. NEVER use the phrase 'Chain of thought'."
+    "content": "Write 3-4 sentences explaining what you built and your architectural plan. Speak naturally and directly to the user (e.g., 'I have built a robust system for you...'). NEVER use the phrase 'Chain of thought' or act like a robot reading instructions."
   },
   {
     "type": "file",
-    "name": "Script_Name",
+    "name": "ModuleName_Or_ScriptName",
     "className": "Script" | "LocalScript" | "ModuleScript", 
     "parent": "ServerScriptService" | "StarterPlayerScripts" | "StarterGui" | "workspace" | "ReplicatedStorage", 
-    "code": "-- Your complete code goes here"
+    "code": "-- Your complete, bug-free, fully functional Luau code goes here"
   }
 ]${customPersona}`;
 
         const messages = [{ role: 'system', content: systemPrompt }];
         
-        if (session.architecture) messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below:\n\n${session.architecture}]` });
-        if (session.currentScript && session.currentScript.length > 10) messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Studio named '${session.currentScriptName}':]\n\`\`\`lua\n${session.currentScript}\n\`\`\`` });
+        if (session.architecture) {
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user's entire game structure is outlined below. Use this to understand where items, remote events, and scripts are located:\n\n${session.architecture}]` });
+        }
+
+        if (session.currentScript && session.currentScript.length > 10) {
+            messages.push({ role: 'system', content: `[SYSTEM CONTEXT: The user currently has this script open in Studio named '${session.currentScriptName}':]\n\`\`\`lua\n${session.currentScript}\n\`\`\`` });
+        }
+
+        // 🚨 PROJECT BRAIN: INJECT MULTI-FILE CONTEXT 🚨
+        if (session.pinnedScripts && Object.keys(session.pinnedScripts).length > 0) {
+            let multiContext = "[SYSTEM CONTEXT: The user has PINNED the following background files for you to read and understand. Use these to ensure your code integrates perfectly with their existing systems:]\n\n";
+            for (const [scriptName, scriptSource] of Object.entries(session.pinnedScripts)) {
+                multiContext += `--- PINNED FILE: ${scriptName} ---\n\`\`\`lua\n${scriptSource}\n\`\`\`\n\n`;
+            }
+            messages.push({ role: 'system', content: multiContext });
+        }
 
         history.forEach(msg => {
-            if (msg.role === 'user') messages.push({ role: 'user', content: msg.content });
-            else {
+            if (msg.role === 'user') {
+                messages.push({ role: 'user', content: msg.content });
+            } else {
                 let aiContent = msg.content;
-                if (msg.code && msg.code.startsWith('[')) aiContent += `\n${msg.code}`; 
+                if (msg.code && msg.code.startsWith('[')) { aiContent += `\n${msg.code}`; }
                 messages.push({ role: 'assistant', content: aiContent });
             }
         });
 
-        // 🚨 INCREASED TOKEN LIMIT TO PREVENT CUTOFFS 🚨
+        console.log(`[AI] Compiling JSON prompt for ${activeModel}...`);
+
         const completion = await aiClient.chat.completions.create({
             model: activeModel, 
             messages: messages,
@@ -224,6 +297,7 @@ Do NOT include any conversational text outside the JSON array.
         let files = [];
 
         try {
+            // 🚨 AGGRESSIVE JSON EXTRACTION 🚨
             let jsonMatch = rawResponse.match(/\[[\s\S]*\]/);
             
             if (jsonMatch) {
@@ -244,6 +318,7 @@ Do NOT include any conversational text outside the JSON array.
             if (e.message === "TRUNCATED" || (e instanceof SyntaxError && rawResponse.includes('[{'))) {
                 return res.status(500).json({ success: false, error: "The generated code was so massive it hit the AI's physical character limit and got cut off! Try asking for fewer items (e.g. 'give me 10 jokes' instead of 150) or ask it to write the code in smaller parts." });
             }
+            // 🚨 CASUAL CHAT FALLBACK 🚨
             console.log("[SERVER] JSON Parse failed, falling back to raw text.");
             chatMessage = rawResponse;
             files = [];
@@ -254,6 +329,7 @@ Do NOT include any conversational text outside the JSON array.
         res.json({ success: true, message: chatMessage, files: files, chatId: chatId });
 
     } catch (err) {
+        console.error("[SERVER] Error during prompt execution:", err);
         const errorMessage = err.message || "Unknown API issue.";
         res.status(500).json({ success: false, error: `API Connection Failed: ${errorMessage}` });
     }
