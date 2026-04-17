@@ -107,7 +107,7 @@ app.post('/api/chats/:chatId/persona', async (req, res) => {
 });
 
 // ==========================================
-// THE AI BRAIN & VISION ENGINE (NON-STREAMING)
+// THE AI BRAIN & VISION ENGINE
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, chatId, imageBase64 } = req.body;
@@ -164,13 +164,19 @@ app.post('/api/prompt', async (req, res) => {
             messages.push({ role: 'user', content: [{ type: "text", text: prompt + visionDirective }, { type: "image_url", image_url: { url: imageBase64 } }] });
         }
 
+        // 🚨 CUSTOM ENDPOINT ROUTING 🚨
         const apiKey = (profile.preferred_model === 'byok' && profile.custom_api_key) ? profile.custom_api_key : process.env.AI_API_KEY;
         if (!apiKey) return res.json({ success: false, error: "No API Key detected. Please save a valid key in the BYOK settings." });
+
+        // Grab custom base URL, or default to OpenAI
+        let baseUrl = (profile.preferred_model === 'byok' && profile.custom_base_url) 
+            ? profile.custom_base_url.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') // Safely format URL
+            : 'https://api.openai.com/v1';
 
         const defaultModel = imageBase64 ? 'gpt-4o' : 'gpt-4-turbo';
         const modelName = (profile.preferred_model === 'byok' && profile.custom_model) ? profile.custom_model : defaultModel;
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await fetch(`${baseUrl}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({ model: modelName, messages: messages, temperature: 0.1 })
