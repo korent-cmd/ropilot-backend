@@ -24,7 +24,7 @@ app.get('/api/generate-pin', (req, res) => {
     
     studioSessions[pin] = { 
         name: "", source: "", architecture: "", pinnedScripts: {}, 
-        isDemo: isDemo, requestsLeft: isDemo ? 10 : 9999, // 🚨 Default to 10
+        isDemo: isDemo, requestsLeft: isDemo ? 10 : 9999, 
         error: null, isOutdated: false
     };
     pendingActions[pin] = { action: 'none', files: null };
@@ -63,29 +63,28 @@ app.get('/code', (req, res) => {
 // 2. WEB DASHBOARD ENDPOINTS
 // ==========================================
 
-// 🚨 UPDATED PAIRING LOGIC (Daily Reset Check) 🚨
 app.post('/api/pair', async (req, res) => {
     const { pin } = req.body;
     const token = req.headers.authorization?.split(' ')[1];
 
     if (!studioSessions[pin]) return res.status(400).json({ success: false, error: 'Invalid PIN.' });
 
-    // Identify the user pairing the device
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (!error && user) {
-        const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+        // 🚨 FIXED: Handle null profile fallback safely
+        const { data: profileData } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+        const profile = profileData || {}; 
+
         if (profile) {
             let tokensUsed = profile.demo_tokens_used || 0;
             let lastReset = profile.last_token_reset ? new Date(profile.last_token_reset) : new Date();
             const now = new Date();
 
-            // If it's a new UTC day, reset their tokens in the database
             if (lastReset.getUTCDate() !== now.getUTCDate() || lastReset.getUTCMonth() !== now.getUTCMonth()) {
                 tokensUsed = 0;
                 await supabase.from('profiles').update({ demo_tokens_used: 0, last_token_reset: now.toISOString() }).eq('id', user.id);
             }
             
-            // Sync UI progress bar immediately
             studioSessions[pin].requestsLeft = 10 - tokensUsed;
         }
     }
@@ -145,10 +144,12 @@ app.post('/api/prompt', async (req, res) => {
     const { data: { user }, error: authError } = await supabase.auth.getUser(token);
     if (authError || !user) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+    // 🚨 FIXED: Handle null profile fallback safely
+    const { data: profileData } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+    const profile = profileData || {}; 
+
     const studio = studioSessions[pin];
 
-    // 🚨 ENFORCE DAILY LIMITS 🚨
     let tokensUsed = profile.demo_tokens_used || 0;
     let lastReset = profile.last_token_reset ? new Date(profile.last_token_reset) : new Date();
     const now = new Date();
@@ -240,11 +241,10 @@ app.post('/api/prompt', async (req, res) => {
 
         await supabase.from('messages').insert({ chat_id: chatId, role: 'ai', content: textResponse, code: JSON.stringify(codeFiles) });
 
-        // 🚨 UPDATE DATABASE TOKENS 🚨
         if (studio && studio.isDemo && profile.preferred_model !== 'byok') {
             tokensUsed += 1;
             await supabase.from('profiles').update({ demo_tokens_used: tokensUsed }).eq('id', user.id);
-            studio.requestsLeft = 10 - tokensUsed; // Sync the live UI
+            studio.requestsLeft = 10 - tokensUsed; 
         }
 
         if (studio && studio.error) studio.error = null;
