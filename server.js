@@ -156,7 +156,7 @@ app.post('/api/prompt', async (req, res) => {
             }
         }
 
-        history.forEach(msg => messages.push({ role: msg.role, content: msg.content }));
+        history.forEach(msg => messages.push({ role: msg.role === 'ai' ? 'assistant' : msg.role, content: msg.content }));
 
         if (imageBase64) {
             const visionDirective = `\n\n[SYSTEM OVERRIDE]: The user has attached an image. Recreate this layout exactly using NATIVE Roblox UI instances. DO NOT use external ImageLabels with Asset IDs. Replicate colors (Color3), corners (UICorner), and borders (UIStroke). Use UDim2. Return JSON array.`;
