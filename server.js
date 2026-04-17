@@ -107,7 +107,7 @@ app.post('/api/chats/:chatId/persona', async (req, res) => {
 });
 
 // ==========================================
-// THE AI BRAIN & VISION ENGINE
+// THE AI BRAIN & VISION ENGINE (NON-STREAMING)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, chatId, imageBase64 } = req.body;
@@ -156,6 +156,7 @@ app.post('/api/prompt', async (req, res) => {
             }
         }
 
+        // Map internal 'ai' role to 'assistant' to prevent OpenAI strictness crashes
         history.forEach(msg => messages.push({ role: msg.role === 'ai' ? 'assistant' : msg.role, content: msg.content }));
 
         if (imageBase64) {
@@ -164,16 +165,17 @@ app.post('/api/prompt', async (req, res) => {
             messages.push({ role: 'user', content: [{ type: "text", text: prompt + visionDirective }, { type: "image_url", image_url: { url: imageBase64 } }] });
         }
 
-        // 🚨 CUSTOM ENDPOINT ROUTING 🚨
+        // 🚨 GET API KEY (Falls back to .env AI_API_KEY)
         const apiKey = (profile.preferred_model === 'byok' && profile.custom_api_key) ? profile.custom_api_key : process.env.AI_API_KEY;
-        if (!apiKey) return res.json({ success: false, error: "No API Key detected. Please save a valid key in the BYOK settings." });
+        if (!apiKey) return res.json({ success: false, error: "No API Key detected." });
 
-        // Grab custom base URL, or default to OpenAI
+        // 🚨 THE FIX: Set Default Base URL to Polza AI
         let baseUrl = (profile.preferred_model === 'byok' && profile.custom_base_url) 
-            ? profile.custom_base_url.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') // Safely format URL
-            : 'https://api.openai.com/v1';
+            ? profile.custom_base_url.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') 
+            : 'https://polza.ai/api/v1';
 
-        const defaultModel = imageBase64 ? 'gpt-4o' : 'gpt-4-turbo';
+        // 🚨 THE FIX: Set Default Model to Kwaipilot (or gpt-4o for images if supported)
+        const defaultModel = imageBase64 ? 'gpt-4o' : 'kwaipilot/kat-coder-pro-v2';
         const modelName = (profile.preferred_model === 'byok' && profile.custom_model) ? profile.custom_model : defaultModel;
 
         const response = await fetch(`${baseUrl}/chat/completions`, {
