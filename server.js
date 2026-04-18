@@ -5,6 +5,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors());
+// 🚨 Kills 413 Payload Too Large errors for high-res Vision requests
 app.use(express.json({ limit: '100mb' })); 
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
@@ -15,6 +16,9 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey);
 const studioSessions = {}; 
 const pendingActions = {}; 
 
+// ==========================================
+// 1. ROBLOX STUDIO ENDPOINTS
+// ==========================================
 app.get('/api/generate-pin', (req, res) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     const isDemo = req.query.demo === 'true';
@@ -49,6 +53,9 @@ app.get('/code', (req, res) => {
     res.json({ action: 'none' });
 });
 
+// ==========================================
+// 2. WEB DASHBOARD ENDPOINTS
+// ==========================================
 app.post('/api/pair', async (req, res) => {
     const { pin } = req.body;
     const token = req.headers.authorization?.split(' ')[1];
@@ -86,6 +93,9 @@ app.post('/api/inject', (req, res) => {
     res.json({ success: true });
 });
 
+// ==========================================
+// 3. CHAT & DATABASE ENDPOINTS
+// ==========================================
 app.get('/api/chats/:userId', async (req, res) => {
     const { data } = await supabase.from('chats').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
     res.json({ chats: data || [] });
@@ -107,11 +117,18 @@ app.post('/api/chats/:chatId/persona', async (req, res) => {
 });
 
 // ==========================================
-// THE AI BRAIN & VISION ENGINE (NON-STREAMING)
+// 4. THE AI BRAIN & VISION ENGINE (NON-STREAMING WITH KILL SWITCH)
 // ==========================================
 app.post('/api/prompt', async (req, res) => {
     let { prompt, pin, chatId, imageBase64 } = req.body;
     const token = req.headers.authorization?.split(' ')[1];
+
+    // 🚨 FULL STACK KILL SWITCH: Abort the request if the client disconnects
+    const abortController = new AbortController();
+    req.on('close', () => {
+        console.log(`[BloxNexus] Connection closed by client. Aborting API request for Chat: ${chatId}`);
+        abortController.abort();
+    });
 
     try {
         const { data: { user }, error: authError } = await supabase.auth.getUser(token);
@@ -156,7 +173,7 @@ app.post('/api/prompt', async (req, res) => {
             }
         }
 
-        // Map internal 'ai' role to 'assistant' to prevent OpenAI strictness crashes
+        // 🚨 PREVENT API CRASHES: Map internal 'ai' role to 'assistant'
         history.forEach(msg => messages.push({ role: msg.role === 'ai' ? 'assistant' : msg.role, content: msg.content }));
 
         if (imageBase64) {
@@ -165,23 +182,25 @@ app.post('/api/prompt', async (req, res) => {
             messages.push({ role: 'user', content: [{ type: "text", text: prompt + visionDirective }, { type: "image_url", image_url: { url: imageBase64 } }] });
         }
 
-        // 🚨 GET API KEY (Falls back to .env AI_API_KEY)
+        // API Key fallback logic
         const apiKey = (profile.preferred_model === 'byok' && profile.custom_api_key) ? profile.custom_api_key : process.env.AI_API_KEY;
-        if (!apiKey) return res.json({ success: false, error: "No API Key detected." });
+        if (!apiKey) return res.json({ success: false, error: "No API Key detected. Please save a valid key in the BYOK settings." });
 
-        // 🚨 THE FIX: Set Default Base URL to Polza AI
+        // Base URL Override (Defaults to Polza AI)
         let baseUrl = (profile.preferred_model === 'byok' && profile.custom_base_url) 
             ? profile.custom_base_url.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') 
             : 'https://polza.ai/api/v1';
 
-        // 🚨 THE FIX: Set Default Model to Kwaipilot (or gpt-4o for images if supported)
+        // Model Override (Defaults to Kat Coder unless an image is attached)
         const defaultModel = imageBase64 ? 'gpt-4o' : 'kwaipilot/kat-coder-pro-v2';
         const modelName = (profile.preferred_model === 'byok' && profile.custom_model) ? profile.custom_model : defaultModel;
 
+        // 🚨 TRIGGER THE API (Wired to the Kill Switch)
         const response = await fetch(`${baseUrl}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-            body: JSON.stringify({ model: modelName, messages: messages, temperature: 0.1 })
+            body: JSON.stringify({ model: modelName, messages: messages, temperature: 0.1 }),
+            signal: abortController.signal
         });
 
         const aiData = await response.json();
@@ -191,13 +210,14 @@ app.post('/api/prompt', async (req, res) => {
 
         let codeFiles = [];
         let textResponse = fullResponse;
-        const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
         
+        // Safely extract the JSON file array from the markdown wrapper
+        const jsonMatch = fullResponse.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
             try {
                 codeFiles = JSON.parse(jsonMatch[0]);
                 textResponse = fullResponse.replace(jsonMatch[0], '').trim();
-            } catch (e) { console.error("JSON Parse failed"); }
+            } catch (e) { console.error("JSON Parse failed on AI response."); }
         }
 
         await supabase.from('messages').insert({ chat_id: chatId, role: 'ai', content: textResponse, code: JSON.stringify(codeFiles) });
@@ -207,11 +227,16 @@ app.post('/api/prompt', async (req, res) => {
             await supabase.from('profiles').update({ demo_tokens_used: tokensUsed }).eq('id', user.id);
             studio.requestsLeft = 10 - tokensUsed; 
         }
+        
         if (studio && studio.error) studio.error = null;
 
         res.json({ success: true, message: textResponse, files: codeFiles, chatId: chatId });
 
     } catch (err) {
+        if (err.name === 'AbortError') {
+            // Handled silently since the frontend knows the user clicked stop.
+            return; 
+        }
         console.error("SERVER FAULT:", err);
         res.json({ success: false, error: 'Engine failed to process the request. Check Render logs.' });
     }
